@@ -1,0 +1,241 @@
+/* =====================================================
+   GESTÃO DE ARMAZÉNS — TOKENS
+   Paleta: base neutra industrial + azul institucional (herdado do site
+   atual) + amarelo de segurança (sinalização de armazém) como acento
+   de ação. Cores de status seguem o fluxo de pendências.
+   Tipografia: IBM Plex Sans (técnica, legível) para tudo; IBM Plex Mono
+   para IDs/etiquetas — remete a etiquetas de expedição.
+   ===================================================== */
+:root{
+  --ink:#171b1e;
+  --ink-soft:#495057;
+  --paper:#f4f5f3;
+  --card:#ffffff;
+  --line:#dfe3e1;
+  --brand:#5e9030;
+  --brand-dark:#436722;
+  --accent:#df8630;
+  --accent-ink:#3a2506;
+  --st-aberta:#df8630;
+  --st-tratamento:#3b82c4;
+  --st-validacao:#8b5cf6;
+  --st-finalizada:#2f9e64;
+  --st-risco:#d64545;
+  --radius:10px;
+  --radius-lg:16px;
+  --shadow:0 1px 2px rgba(23,27,30,.06), 0 6px 16px rgba(23,27,30,.06);
+  --font:'IBM Plex Sans', system-ui, sans-serif;
+  --mono:'IBM Plex Mono', ui-monospace, monospace;
+}
+
+[hidden]{display:none !important}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:var(--font);
+  background:var(--paper);
+  background-image:
+    linear-gradient(90deg, rgba(94,144,48,.035) 1px, transparent 1px),
+    linear-gradient(rgba(94,144,48,.035) 1px, transparent 1px);
+  background-size:28px 28px;
+  color:var(--ink);
+  min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{margin:0;font-weight:600;letter-spacing:-.01em}
+p{margin:0}
+button{font-family:inherit}
+input,select,textarea{font-family:inherit;font-size:16px}
+
+/* ---------- layout shell ---------- */
+.topbar{
+  position:sticky;top:0;z-index:20;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 16px;background:var(--brand);color:#fff;
+  box-shadow:var(--shadow);
+}
+.topbar__brand{display:flex;align-items:center;gap:10px}
+.topbar__mark{
+  width:34px;height:34px;object-fit:contain;
+  background:#fff;border-radius:7px;padding:3px;
+}
+.topbar__meta{display:flex;flex-direction:column;line-height:1.2}
+.topbar__meta strong{font-size:14px}
+.topbar__meta span{font-size:12px;opacity:.85}
+
+.app{max-width:640px;margin:0 auto;padding:16px;padding-bottom:96px;min-height:70vh}
+
+.tabbar{
+  position:fixed;bottom:0;left:0;right:0;z-index:20;
+  display:flex;background:var(--card);border-top:1px solid var(--line);
+  box-shadow:0 -4px 16px rgba(23,27,30,.08);
+}
+.tabbar button{
+  flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;
+  padding:9px 4px 10px;background:none;border:none;color:var(--ink-soft);
+  font-size:11px;cursor:pointer;
+}
+.tabbar button .ic{font-size:18px;line-height:1;display:inline-block}
+.tab-badge{
+  position:absolute;top:-7px;right:-11px;background:var(--st-risco);color:#fff;
+  font-family:var(--mono);font-size:10px;font-weight:700;border-radius:999px;
+  min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px;
+}
+.tabbar button.is-active{color:var(--brand);font-weight:600}
+
+/* ---------- generic building blocks ---------- */
+.screen{display:flex;flex-direction:column;gap:16px}
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);
+  padding:18px;box-shadow:var(--shadow);
+}
+.card + .card{margin-top:0}
+.stack{display:flex;flex-direction:column;gap:12px}
+.row{display:flex;gap:10px;align-items:center}
+.row.between{justify-content:space-between}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+.eyebrow{
+  font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--brand);font-weight:600;
+}
+.title-xl{font-size:26px;line-height:1.15}
+.title-lg{font-size:19px}
+.subtle{color:var(--ink-soft);font-size:13px}
+
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  border-radius:var(--radius);border:1px solid transparent;
+  padding:13px 18px;font-size:15px;font-weight:600;cursor:pointer;
+  transition:transform .05s ease, opacity .15s ease;
+}
+.btn:active{transform:scale(.98)}
+.btn--primary{background:var(--brand);color:#fff}
+.btn--primary:hover{background:var(--brand-dark)}
+.btn--accent{background:var(--accent);color:var(--accent-ink)}
+.btn--outline{background:transparent;border-color:var(--line);color:var(--ink)}
+.btn--ghost{background:transparent;color:#fff;border-color:rgba(255,255,255,.4)}
+.btn--danger{background:#fdeceb;color:var(--st-risco);border-color:#f6c8c4}
+.btn--sm{padding:8px 12px;font-size:13px}
+.btn--block{width:100%}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:13px;font-weight:600;color:var(--ink-soft)}
+.field input,.field select,.field textarea{
+  padding:12px 13px;border:1px solid var(--line);border-radius:var(--radius);
+  background:#fff;color:var(--ink);
+}
+.field input:focus,.field select:focus,.field textarea:focus,button:focus-visible{
+  outline:2px solid var(--brand);outline-offset:1px;
+}
+.field textarea{resize:vertical;min-height:70px}
+
+.option-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.option-btn{
+  padding:16px 10px;border-radius:var(--radius);border:1.5px solid var(--line);
+  background:#fff;font-weight:600;font-size:15px;cursor:pointer;text-align:center;
+}
+.option-btn.is-selected{border-color:var(--brand);background:#eef5e7;color:var(--brand-dark)}
+.option-btn.danger.is-selected{border-color:var(--st-risco);background:#fdeceb;color:var(--st-risco)}
+
+.list-item{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  background:#fff;border:1px solid var(--line);border-radius:var(--radius);
+  padding:13px 14px;cursor:pointer;
+}
+.list-item:active{background:#f7f9f8}
+.list-item__title{font-weight:600;font-size:14.5px}
+.list-item__sub{color:var(--ink-soft);font-size:12.5px;margin-top:2px}
+
+.tag{
+  font-family:var(--mono);font-size:10.5px;font-weight:600;letter-spacing:.03em;
+  padding:3px 7px;border-radius:5px;white-space:nowrap;
+}
+.tag--aberta{background:#fdf1de;color:#8a5a10}
+.tag--tratamento{background:#e7f0f9;color:var(--st-tratamento)}
+.tag--validacao{background:#f1ecfd;color:var(--st-validacao)}
+.tag--finalizada{background:#e6f6ed;color:var(--st-finalizada)}
+
+/* "etiqueta de expedição" — o elemento de assinatura visual do app */
+.shiplabel{
+  display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:11px;font-weight:600;color:var(--brand-dark);
+  border:1.5px dashed var(--brand);border-radius:6px;padding:3px 9px;
+  background:#fff;
+}
+
+.empty{
+  text-align:center;padding:36px 18px;color:var(--ink-soft);
+}
+.empty .ic{font-size:30px;display:block;margin-bottom:8px}
+
+.divider{height:1px;background:var(--line);margin:4px 0}
+
+.photo-input{display:flex;flex-direction:column;gap:8px}
+.photo-preview{
+  width:100%;max-height:220px;object-fit:cover;border-radius:var(--radius);
+  border:1px solid var(--line);
+}
+.photo-btn{
+  border:1.5px dashed var(--line);border-radius:var(--radius);padding:22px;
+  text-align:center;color:var(--ink-soft);font-size:13px;font-weight:600;cursor:pointer;
+  background:#fafbfa;
+}
+.photo-btn.required{border-color:var(--st-risco);color:var(--st-risco)}
+
+.badge-count{
+  font-family:var(--mono);font-weight:700;font-size:22px;color:var(--brand);
+}
+
+.kpi-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+.kpi .badge-count{display:block}
+.kpi .subtle{margin-top:2px}
+
+.bar-row{display:flex;align-items:center;gap:10px;font-size:13px}
+.bar-row .label{width:110px;flex-shrink:0;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;background:#eef0ef;border-radius:6px;height:10px;overflow:hidden}
+.bar-fill{height:100%;background:var(--brand);border-radius:6px}
+.bar-val{font-family:var(--mono);width:32px;text-align:right;font-size:12px;color:var(--ink-soft)}
+
+.report-table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:600px}
+.report-table th,.report-table td{border:1px solid var(--line);padding:6px 8px;text-align:left;white-space:nowrap}
+.report-table th{background:var(--paper);font-weight:600;color:var(--ink-soft);font-size:11px;text-transform:uppercase;letter-spacing:.03em}
+
+.toast{
+  position:fixed;top:14px;left:50%;transform:translateX(-50%) translateY(-16px);
+  background:var(--ink);color:#fff;padding:11px 18px;border-radius:999px;
+  font-size:13.5px;font-weight:500;box-shadow:var(--shadow);z-index:100;
+  opacity:0;pointer-events:none;transition:opacity .2s ease, transform .2s ease;
+}
+.toast.is-show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.is-error{background:var(--st-risco)}
+.toast.is-success{background:var(--st-finalizada)}
+
+.filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px}
+.filters select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fff;font-size:13px}
+
+.login-logo{
+  display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px;
+}
+.login-logo .mark{
+  width:88px;height:88px;object-fit:contain;
+}
+
+.spinner{
+  width:20px;height:20px;border-radius:50%;border:2.5px solid rgba(255,255,255,.4);
+  border-top-color:#fff;animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+@media (min-width:720px){
+  .app{max-width:880px}
+  .option-grid{grid-template-columns:repeat(4,1fr)}
+  .kpi-grid{grid-template-columns:repeat(4,1fr)}
+}
+
+@media (prefers-reduced-motion: reduce){
+  *{animation-duration:.001ms !important;transition-duration:.001ms !important}
+}

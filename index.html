@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="theme-color" content="#5e9030">
+<title>ICC Brazil · Checklist da Qualidade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="icon" type="image/png" href="logo.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<header class="topbar" id="topbar" hidden>
+  <div class="topbar__brand">
+    <img class="topbar__mark" src="logo.png" alt="ICC Brazil">
+    <div class="topbar__meta">
+      <strong id="topbarUnidade">—</strong>
+      <span id="topbarUsuario">—</span>
+    </div>
+  </div>
+  <div class="row" style="gap:6px">
+    <button class="btn btn--ghost btn--sm" id="btnLogout">Sair</button>
+  </div>
+</header>
+
+<main id="app" class="app"></main>
+
+<nav class="tabbar" id="tabbar" hidden></nav>
+
+<script src="app.js"></script>
+</body>
+</html>
