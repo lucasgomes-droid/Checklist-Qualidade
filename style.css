@@ -1,10 +1,10 @@
 /* =====================================================
-   GESTÃO DE ARMAZÉNS — TOKENS
-   Paleta: base neutra industrial + azul institucional (herdado do site
-   atual) + amarelo de segurança (sinalização de armazém) como acento
-   de ação. Cores de status seguem o fluxo de pendências.
+   CHECKLIST DA QUALIDADE — TOKENS
+   Paleta: cinza grafite (cor institucional da Qualidade, neutra e
+   corporativa) + verde do logo ICC como acento de ação/sucesso.
+   Cores de status seguem o fluxo de validação/pendências.
    Tipografia: IBM Plex Sans (técnica, legível) para tudo; IBM Plex Mono
-   para IDs/etiquetas — remete a etiquetas de expedição.
+   para IDs/etiquetas.
    ===================================================== */
 :root{
   --ink:#171b1e;
@@ -12,14 +12,15 @@
   --paper:#f4f5f3;
   --card:#ffffff;
   --line:#dfe3e1;
-  --brand:#5e9030;
-  --brand-dark:#436722;
-  --accent:#df8630;
-  --accent-ink:#3a2506;
+  --brand:#3f4448;
+  --brand-dark:#2a2e31;
+  --accent:#5e9030;
+  --accent-dark:#436722;
+  --accent-ink:#ffffff;
   --st-aberta:#df8630;
   --st-tratamento:#3b82c4;
   --st-validacao:#8b5cf6;
-  --st-finalizada:#2f9e64;
+  --st-finalizada:#5e9030;
   --st-risco:#d64545;
   --radius:10px;
   --radius-lg:16px;
@@ -82,7 +83,7 @@ input,select,textarea{font-family:inherit;font-size:16px}
   font-family:var(--mono);font-size:10px;font-weight:700;border-radius:999px;
   min-width:16px;height:16px;line-height:16px;text-align:center;padding:0 3px;
 }
-.tabbar button.is-active{color:var(--brand);font-weight:600}
+.tabbar button.is-active{color:var(--accent);font-weight:600}
 
 /* ---------- generic building blocks ---------- */
 .screen{display:flex;flex-direction:column;gap:16px}
@@ -98,7 +99,7 @@ input,select,textarea{font-family:inherit;font-size:16px}
 
 .eyebrow{
   font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;
-  color:var(--brand);font-weight:600;
+  color:var(--accent);font-weight:600;
 }
 .title-xl{font-size:26px;line-height:1.15}
 .title-lg{font-size:19px}
@@ -111,9 +112,9 @@ input,select,textarea{font-family:inherit;font-size:16px}
   transition:transform .05s ease, opacity .15s ease;
 }
 .btn:active{transform:scale(.98)}
-.btn--primary{background:var(--brand);color:#fff}
-.btn--primary:hover{background:var(--brand-dark)}
-.btn--accent{background:var(--accent);color:var(--accent-ink)}
+.btn--primary{background:var(--accent);color:#fff}
+.btn--primary:hover{background:var(--accent-dark)}
+.btn--accent{background:var(--brand);color:#fff}
 .btn--outline{background:transparent;border-color:var(--line);color:var(--ink)}
 .btn--ghost{background:transparent;color:#fff;border-color:rgba(255,255,255,.4)}
 .btn--danger{background:#fdeceb;color:var(--st-risco);border-color:#f6c8c4}
@@ -137,7 +138,7 @@ input,select,textarea{font-family:inherit;font-size:16px}
   padding:16px 10px;border-radius:var(--radius);border:1.5px solid var(--line);
   background:#fff;font-weight:600;font-size:15px;cursor:pointer;text-align:center;
 }
-.option-btn.is-selected{border-color:var(--brand);background:#eef5e7;color:var(--brand-dark)}
+.option-btn.is-selected{border-color:var(--accent);background:#eef5e7;color:var(--accent-dark)}
 .option-btn.danger.is-selected{border-color:var(--st-risco);background:#fdeceb;color:var(--st-risco)}
 
 .list-item{
@@ -186,7 +187,7 @@ input,select,textarea{font-family:inherit;font-size:16px}
 .photo-btn.required{border-color:var(--st-risco);color:var(--st-risco)}
 
 .badge-count{
-  font-family:var(--mono);font-weight:700;font-size:22px;color:var(--brand);
+  font-family:var(--mono);font-weight:700;font-size:22px;color:var(--accent);
 }
 
 .kpi-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
@@ -197,7 +198,7 @@ input,select,textarea{font-family:inherit;font-size:16px}
 .bar-row{display:flex;align-items:center;gap:10px;font-size:13px}
 .bar-row .label{width:110px;flex-shrink:0;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar-track{flex:1;background:#eef0ef;border-radius:6px;height:10px;overflow:hidden}
-.bar-fill{height:100%;background:var(--brand);border-radius:6px}
+.bar-fill{height:100%;background:var(--accent);border-radius:6px}
 .bar-val{font-family:var(--mono);width:32px;text-align:right;font-size:12px;color:var(--ink-soft)}
 
 .report-table{border-collapse:collapse;width:100%;font-size:12.5px;min-width:600px}

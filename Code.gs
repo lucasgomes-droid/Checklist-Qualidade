@@ -29,6 +29,7 @@ const SHEETS = {
   ATIVIDADES: 'ATIVIDADES',
   CHECKLISTS: 'CHECKLISTS',
   OCORRENCIAS: 'OCORRENCIAS',
+  NAO_CONFORMIDADES: 'NAO_CONFORMIDADES',
   SEQ: '_SEQ'
 };
 
@@ -39,7 +40,12 @@ const HEADERS = {
   TURNOS: ['ID_TURNO', 'TURNO', 'ATIVO'],
   ATIVIDADES: ['ID_ATIVIDADE', 'LOCAL', 'AMBIENTE', 'ATIVIDADE', 'PERIODICIDADE', 'TURNO', 'DIA_SEMANA', 'DIA_MES', 'FOTO_ANTES', 'FOTO_DEPOIS', 'VALIDACAO', 'ATIVO'],
   CHECKLISTS: ['ID_CHECKLIST', 'DATA', 'HORA', 'TURNO', 'LOCAL', 'AMBIENTE', 'ATIVIDADE', 'ID_ATIVIDADE', 'PERIODICIDADE', 'ID_AGENTE', 'AGENTE', 'RESULTADO', 'OBSERVACAO', 'FOTO_ANTES', 'FOTO_DEPOIS', 'STATUS', 'ADMIN_VALIDADOR', 'DATA_VALIDACAO', 'MOTIVO_REPROVACAO', 'OBS_VALIDACAO', 'REFAZER'],
-  OCORRENCIAS: ['ID_OCORRENCIA', 'DATA', 'HORA', 'TURNO', 'ID_AGENTE', 'AGENTE', 'LOCAL', 'AMBIENTE', 'DESCRICAO', 'FOTO', 'STATUS', 'ADMIN_ANALISE', 'DATA_ANALISE', 'RESULTADO_ANALISE', 'OBSERVACAO_ANALISE'],
+  OCORRENCIAS: ['ID_OCORRENCIA', 'DATA', 'HORA', 'TURNO', 'ID_AGENTE', 'AGENTE', 'LOCAL', 'AMBIENTE', 'DESCRICAO', 'FOTO', 'STATUS', 'ADMIN_ANALISE', 'DATA_ANALISE', 'RESULTADO_ANALISE', 'OBSERVACAO_ANALISE', 'TURNO_RESPONSAVEL', 'ID_AGENTE_RESPONSAVEL', 'AGENTE_RESPONSAVEL', 'DATA_ULTIMA_LIMPEZA'],
+  // "Não Conformidade" = inspeção feita pelo próprio Admin da Qualidade no
+  // local, já direcionando o problema encontrado a um Agente de Limpeza
+  // específico (como uma pendência direcionada, ao contrário de OCORRENCIAS,
+  // que é aberta livremente pelo agente).
+  NAO_CONFORMIDADES: ['ID_NC', 'DATA', 'HORA', 'LOCAL', 'AMBIENTE', 'DESCRICAO', 'FOTO', 'ID_AGENTE_RESPONSAVEL', 'AGENTE_RESPONSAVEL', 'ADMIN_ABRIU', 'STATUS', 'DATA_RESOLUCAO', 'DESCRICAO_RESOLUCAO', 'FOTO_RESOLUCAO', 'DATA_VALIDACAO', 'ADMIN_VALIDADOR', 'MOTIVO_REPROVACAO'],
   _SEQ: ['PREFIXO', 'ULTIMO_NUMERO']
 };
 
@@ -163,7 +169,7 @@ function routeAction_(action, params) {
   const readOnlyActions = ['getUsuarios', 'getLocais', 'getAmbientes', 'getTurnos',
     'getAtividades', 'getChecklists', 'getOcorrencias', 'getHistoricoAgente',
     'getPainelHoje', 'getDashboardChecklist', 'getDashboardOcorrencias',
-    'getDashboardFotos', 'gerarRelatorioPDF'];
+    'getDashboardFotos', 'gerarRelatorioPDF', 'getUltimaLimpeza', 'getNaoConformidades'];
 
   if (!readOnlyActions.includes(action)) {
     lock.waitLock(10000);
@@ -181,10 +187,17 @@ function routeAction_(action, params) {
       case 'getChecklists': return { ok: true, data: getChecklists_(params) };
       case 'validarChecklist': return validarChecklist_(params);
 
+      case 'getUltimaLimpeza': return { ok: true, data: buscarUltimaLimpeza_(params.local, params.ambiente) };
+
       case 'createOcorrencia': return criarOcorrencia_(params);
       case 'getOcorrencias': return { ok: true, data: getOcorrencias_(params) };
       case 'validarOcorrencia': return validarOcorrencia_(params);
       case 'atualizarStatusOcorrencia': return atualizarStatusOcorrencia_(params);
+
+      case 'createNaoConformidade': return criarNaoConformidade_(params);
+      case 'getNaoConformidades': return { ok: true, data: getNaoConformidades_(params) };
+      case 'resolverNaoConformidade': return resolverNaoConformidade_(params);
+      case 'validarNaoConformidade': return validarNaoConformidade_(params);
 
       case 'getHistoricoAgente': return { ok: true, data: getHistoricoAgente_(params.idAgente) };
 
@@ -492,9 +505,35 @@ function validarChecklist_(p) {
 
 // ======================= OCORRÊNCIAS =======================
 
+// Busca no histórico de CHECKLISTS quem foi o último Agente de Limpeza (e em
+// qual turno) a executar uma limpeza naquele Local+Ambiente. Usada tanto para
+// preencher automaticamente o "turno responsável" ao abrir uma ocorrência,
+// quanto para sugerir o responsável ao abrir uma Não Conformidade.
+function buscarUltimaLimpeza_(local, ambiente) {
+  const rows = readSheet_(SHEETS.CHECKLISTS).filter(function (r) {
+    return r.LOCAL === local && r.AMBIENTE === ambiente;
+  });
+  if (!rows.length) return null;
+  rows.sort(function (a, b) { return b.ID_CHECKLIST.localeCompare(a.ID_CHECKLIST); });
+  const ultima = rows[0];
+  return {
+    turno: ultima.TURNO,
+    idAgente: ultima.ID_AGENTE,
+    agente: ultima.AGENTE,
+    data: ultima.DATA,
+    hora: ultima.HORA
+  };
+}
+
+// A ocorrência é sobre um problema encontrado num Local+Ambiente — o turno
+// e o agente "responsáveis" pelo problema são automaticamente os da última
+// limpeza registrada ali (não o turno/agente de quem está abrindo a
+// ocorrência, que pode ser de outro turno relatando algo que já estava
+// errado quando chegou).
 function criarOcorrencia_(p) {
   const idOcorrencia = nextId_('OCO');
   const foto = salvarFoto_(p.foto, idOcorrencia);
+  const ultimaLimpeza = buscarUltimaLimpeza_(p.local, p.ambiente);
   appendRow_(SHEETS.OCORRENCIAS, {
     ID_OCORRENCIA: idOcorrencia,
     DATA: nowDateStr_(),
@@ -510,9 +549,13 @@ function criarOcorrencia_(p) {
     ADMIN_ANALISE: '',
     DATA_ANALISE: '',
     RESULTADO_ANALISE: '',
-    OBSERVACAO_ANALISE: ''
+    OBSERVACAO_ANALISE: '',
+    TURNO_RESPONSAVEL: ultimaLimpeza ? ultimaLimpeza.turno : '',
+    ID_AGENTE_RESPONSAVEL: ultimaLimpeza ? ultimaLimpeza.idAgente : '',
+    AGENTE_RESPONSAVEL: ultimaLimpeza ? ultimaLimpeza.agente : '',
+    DATA_ULTIMA_LIMPEZA: ultimaLimpeza ? (ultimaLimpeza.data + ' ' + ultimaLimpeza.hora) : ''
   });
-  return { ok: true, data: { idOcorrencia: idOcorrencia } };
+  return { ok: true, data: { idOcorrencia: idOcorrencia, ultimaLimpeza: ultimaLimpeza } };
 }
 
 function getOcorrencias_(params) {
@@ -545,14 +588,84 @@ function atualizarStatusOcorrencia_(p) {
   return { ok: true };
 }
 
+// ======================= NÃO CONFORMIDADE (inspeção direcionada) =======================
+// Diferente de OCORRENCIAS (aberta livremente por qualquer Agente), aqui é o
+// próprio Administrador da Qualidade que inspeciona o local, encontra um
+// problema, e já direciona a resolução a um Agente de Limpeza específico —
+// funciona como uma pendência: Aberta (pro agente resolver) → Aguardando
+// validação (agente resolveu, mandou foto) → Finalizada/Reprovada (admin
+// valida a resolução).
+
+function criarNaoConformidade_(p) {
+  const idNc = nextId_('NC');
+  const foto = salvarFoto_(p.foto, idNc);
+  appendRow_(SHEETS.NAO_CONFORMIDADES, {
+    ID_NC: idNc,
+    DATA: nowDateStr_(),
+    HORA: nowTimeStr_(),
+    LOCAL: p.local,
+    AMBIENTE: p.ambiente,
+    DESCRICAO: p.descricao || '',
+    FOTO: foto,
+    ID_AGENTE_RESPONSAVEL: p.idAgenteResponsavel,
+    AGENTE_RESPONSAVEL: p.agenteResponsavel,
+    ADMIN_ABRIU: p.adminAbriu || '',
+    STATUS: 'ABERTA',
+    DATA_RESOLUCAO: '',
+    DESCRICAO_RESOLUCAO: '',
+    FOTO_RESOLUCAO: '',
+    DATA_VALIDACAO: '',
+    ADMIN_VALIDADOR: '',
+    MOTIVO_REPROVACAO: ''
+  });
+  return { ok: true, data: { idNc: idNc } };
+}
+
+function getNaoConformidades_(params) {
+  let rows = readSheet_(SHEETS.NAO_CONFORMIDADES);
+  if (params.idAgenteResponsavel) rows = rows.filter(function (r) { return String(r.ID_AGENTE_RESPONSAVEL) === String(params.idAgenteResponsavel); });
+  if (params.status) rows = rows.filter(function (r) { return r.STATUS === params.status; });
+  if (params.local) rows = rows.filter(function (r) { return r.LOCAL === params.local; });
+  if (params.dataInicial) rows = rows.filter(function (r) { return toDate_(r.DATA) >= toDate_(params.dataInicial); });
+  if (params.dataFinal) rows = rows.filter(function (r) { return toDate_(r.DATA) <= toDate_(params.dataFinal); });
+  return rows.sort(function (a, b) { return b.ID_NC.localeCompare(a.ID_NC); });
+}
+
+// O Agente de Limpeza resolve a não conformidade direcionada a ele,
+// obrigatoriamente com foto de comprovação — igual ao fluxo de pendências
+// do sistema de armazéns.
+function resolverNaoConformidade_(p) {
+  if (!p.fotoResolucao) return { ok: false, error: 'Foto de comprovação é obrigatória para resolver.' };
+  const foto = salvarFoto_(p.fotoResolucao, p.idNc + '_resolucao');
+  updateRowById_(SHEETS.NAO_CONFORMIDADES, 'ID_NC', p.idNc, {
+    STATUS: 'AGUARDANDO_VALIDACAO',
+    DESCRICAO_RESOLUCAO: p.descricaoResolucao || '',
+    FOTO_RESOLUCAO: foto,
+    DATA_RESOLUCAO: nowDateStr_() + ' ' + nowTimeStr_()
+  });
+  return { ok: true };
+}
+
+function validarNaoConformidade_(p) {
+  updateRowById_(SHEETS.NAO_CONFORMIDADES, 'ID_NC', p.idNc, {
+    STATUS: p.aprovado ? 'FINALIZADA' : 'ABERTA',
+    ADMIN_VALIDADOR: p.adminValidador || '',
+    DATA_VALIDACAO: nowDateStr_() + ' ' + nowTimeStr_(),
+    MOTIVO_REPROVACAO: p.aprovado ? '' : (p.motivo || '')
+  });
+  return { ok: true };
+}
+
 // ======================= HISTÓRICO =======================
 
 function getHistoricoAgente_(idAgente) {
   const checklists = readSheet_(SHEETS.CHECKLISTS).filter(function (c) { return String(c.ID_AGENTE) === String(idAgente); });
   const ocorrencias = readSheet_(SHEETS.OCORRENCIAS).filter(function (o) { return String(o.ID_AGENTE) === String(idAgente); });
+  const naoConformidades = readSheet_(SHEETS.NAO_CONFORMIDADES).filter(function (n) { return String(n.ID_AGENTE_RESPONSAVEL) === String(idAgente); });
   return {
     checklists: checklists.sort(function (a, b) { return b.ID_CHECKLIST.localeCompare(a.ID_CHECKLIST); }),
-    ocorrencias: ocorrencias.sort(function (a, b) { return b.ID_OCORRENCIA.localeCompare(a.ID_OCORRENCIA); })
+    ocorrencias: ocorrencias.sort(function (a, b) { return b.ID_OCORRENCIA.localeCompare(a.ID_OCORRENCIA); }),
+    naoConformidades: naoConformidades.sort(function (a, b) { return b.ID_NC.localeCompare(a.ID_NC); })
   };
 }
 
@@ -638,6 +751,14 @@ function getDashboardChecklist_(params) {
     const okTurno = !params.turno || o.TURNO === params.turno;
     return okLocal && okAmbiente && okTurno && toDate_(o.DATA) >= toDate_(dataInicial) && toDate_(o.DATA) <= toDate_(dataFinal);
   });
+  // Não conformidades abertas pela própria Qualidade (inspeção do admin,
+  // direcionada a um agente) — diferente das ocorrências acima, que são
+  // abertas livremente pelos agentes.
+  const naoConformidadesQualidadeNoPeriodo = readSheet_(SHEETS.NAO_CONFORMIDADES).filter(function (n) {
+    const okLocal = !params.local || n.LOCAL === params.local;
+    const okAmbiente = !params.ambiente || n.AMBIENTE === params.ambiente;
+    return okLocal && okAmbiente && toDate_(n.DATA) >= toDate_(dataInicial) && toDate_(n.DATA) <= toDate_(dataFinal);
+  });
 
   const totalPrevisto = previstos.length;
   const validados = aprovadosCount + reprovadosCount;
@@ -653,10 +774,15 @@ function getDashboardChecklist_(params) {
     percentualAprovacao: validados ? Math.round((aprovadosCount / validados) * 1000) / 10 : 0,
     naoConformidades: naoConformidades,
     totalOcorrencias: ocorrenciasNoPeriodo.length,
+    totalNaoConformidadesQualidade: naoConformidadesQualidadeNoPeriodo.length,
     porAgente: agruparContagem_(realizados, 'AGENTE'),
     porLocal: agruparContagem_(realizados, 'LOCAL'),
     porAmbiente: agruparContagem_(realizados, 'AMBIENTE'),
     porTurno: agruparContagem_(realizados, 'TURNO'),
+    aprovadosPorAgente: agruparContagem_(realizados.filter(function (r) { return r.STATUS === 'APROVADO'; }), 'AGENTE'),
+    reprovadosPorAgente: agruparContagem_(realizados.filter(function (r) { return r.STATUS === 'REPROVADO'; }), 'AGENTE'),
+    aprovadosPorTurno: agruparContagem_(realizados.filter(function (r) { return r.STATUS === 'APROVADO'; }), 'TURNO'),
+    reprovadosPorTurno: agruparContagem_(realizados.filter(function (r) { return r.STATUS === 'REPROVADO'; }), 'TURNO'),
     ocorrenciasPorAgente: agruparContagem_(ocorrenciasNoPeriodo, 'AGENTE'),
     ocorrenciasPorLocal: agruparContagem_(ocorrenciasNoPeriodo, 'LOCAL'),
     ocorrenciasPorAmbiente: agruparContagem_(ocorrenciasNoPeriodo, 'AMBIENTE'),
@@ -676,16 +802,25 @@ function getDashboardOcorrencias_(params) {
   if (params.dataInicial) rows = rows.filter(function (r) { return toDate_(r.DATA) >= toDate_(params.dataInicial); });
   if (params.dataFinal) rows = rows.filter(function (r) { return toDate_(r.DATA) <= toDate_(params.dataFinal); });
 
+  // Uma ocorrência é "entre turnos" quando o turno de quem relatou é
+  // diferente do turno responsável identificado (última limpeza no local).
+  const entreTurnos = rows.filter(function (r) { return r.TURNO_RESPONSAVEL && r.TURNO && r.TURNO_RESPONSAVEL !== r.TURNO; });
+
   return {
     total: rows.length,
     pendentes: rows.filter(function (r) { return r.STATUS === 'ABERTA' || r.STATUS === 'EM_ANALISE'; }).length,
     validadas: rows.filter(function (r) { return r.STATUS === 'PROCEDENTE' || r.STATUS === 'NAO_PROCEDENTE' || r.STATUS === 'TRATADA' || r.STATUS === 'ENCERRADA'; }).length,
     procedentes: rows.filter(function (r) { return r.STATUS === 'PROCEDENTE' || r.STATUS === 'TRATADA' || r.STATUS === 'ENCERRADA'; }).length,
     naoProcedentes: rows.filter(function (r) { return r.STATUS === 'NAO_PROCEDENTE'; }).length,
+    totalEntreTurnos: entreTurnos.length,
     porAgente: agruparContagem_(rows, 'AGENTE'),
     porLocal: agruparContagem_(rows, 'LOCAL'),
     porAmbiente: agruparContagem_(rows, 'AMBIENTE'),
     porTurno: agruparContagem_(rows, 'TURNO'),
+    porTurnoAbertura: agruparContagem_(rows, 'TURNO'),
+    porTurnoResponsavel: agruparContagem_(rows, 'TURNO_RESPONSAVEL'),
+    porAgenteResponsavel: agruparContagem_(rows, 'AGENTE_RESPONSAVEL'),
+    registrosEntreTurnos: entreTurnos,
     registros: rows
   };
 }

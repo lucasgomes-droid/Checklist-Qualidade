@@ -1,5 +1,12 @@
 # Checklist da Qualidade — ICC Brazil Animal Nutrition — Guia de Configuração
 
+> **Atualização:** esta versão adiciona o módulo de **Não Conformidade**
+> (inspeção feita pelo próprio Admin, direcionada a um agente específico),
+> identificação automática de responsável nas ocorrências, reorganização
+> do painel do dia e nova paleta de cores (cinza grafite + verde). Se você
+> já tinha a versão anterior rodando, veja a seção **"Atualizando de uma
+> versão anterior"** mais abaixo antes de seguir os passos normais.
+
 Mesma arquitetura do sistema de Gestão de Armazéns que a empresa já usa:
 **frontend estático** (HTML/CSS/JS, pode ser hospedado no GitHub Pages) +
 **backend em Google Apps Script**, que lê e escreve direto na planilha do
@@ -42,6 +49,44 @@ Google Sheets. Não há servidor próprio — a planilha *é* o banco de dados.
 
 ---
 
+## Atualizando de uma versão anterior
+
+1. No editor do Apps Script, substitua todo o conteúdo do `Code.gs` pelo
+   novo, e rode `configurarPlanilha` de novo (Executar). Isso é seguro:
+   ele só **adiciona** a nova aba `NAO_CONFORMIDADES` e as novas colunas em
+   `OCORRENCIAS` (`TURNO_RESPONSAVEL`, `ID_AGENTE_RESPONSAVEL`,
+   `AGENTE_RESPONSAVEL`, `DATA_ULTIMA_LIMPEZA`) — não apaga nada que já
+   existia nas outras abas.
+2. Crie uma **nova versão** da implantação (Implantar → Gerenciar
+   implantações → ✏️ → Nova versão) para o backend atualizado valer na
+   URL já publicada. Você **não** precisa mudar a `API_URL` no `app.js`.
+3. Substitua `app.js`, `index.html` e `style.css` pelos novos no seu
+   repositório do GitHub Pages. `logo.png` não muda.
+
+## O que essa atualização mudou
+
+- **Painel do dia** saiu da tela inicial do admin (que agora mostra só um
+  resumo) e passou a ser uma tela própria, acessada tocando no card do
+  resumo — pra não poluir a home com uma lista grande todo santo dia.
+- **Ocorrências**: a lista agora mostra com clareza quem abriu, quando, e
+  o responsável identificado. O campo "Turno" que o agente preenchia
+  manualmente foi removido — agora o sistema busca automaticamente, no
+  histórico de `CHECKLISTS`, quem foi a última pessoa (e em qual turno) a
+  limpar aquele local+ambiente, e marca essa pessoa como responsável pela
+  não conformidade encontrada. Isso resolve o caso de um agente do turno 2
+  relatando algo que já estava errado quando ele chegou — o sistema aponta
+  o turno 1 como responsável, não quem relatou.
+- **Nova aba "Não Conformidade"** (só para o Admin): o Admin inspeciona um
+  local, encontra um problema, e já direciona a resolução a um Agente de
+  Limpeza específico (o sistema sugere automaticamente quem limpou aquele
+  local por último, mas o Admin pode trocar). Funciona como uma pendência:
+  o agente recebe na aba "Pendências" (novo item na barra de navegação
+  dele), resolve com foto de comprovação, e o Admin valida (aprova ou
+  devolve com o que falta corrigir).
+- **Cores**: paleta trocada para cinza grafite (cor institucional,
+  usada no topo e em botões secundários) + verde do logo ICC como cor de
+  destaque/ação (botões principais, abas ativas, barras dos dashboards).
+
 ## Mapeamento com a especificação original
 
 A especificação original sugeria 11 abas (USUARIOS, LOCAIS, AMBIENTES,
@@ -75,8 +120,9 @@ alguém precisa abrir para editar/consultar algo, sem duplicar dados.
 | `TURNOS` | Turnos disponíveis (1º, 2º, 3º turno, ou o nome que preferir). |
 | `ATIVIDADES` | O "planejamento de limpeza": cada linha é uma atividade (ex: "Limpeza banheiro feminino") vinculada a um local+ambiente, com periodicidade (`DIARIO`/`SEMANAL`/`MENSAL`), turno (vazio = todos os turnos), e se exige foto antes/depois/validação (`SIM`/`NAO`). Para `SEMANAL`, `DIA_SEMANA` (0=domingo...6=sábado) define em qual dia — deixe vazio para "qualquer dia da semana". Para `MENSAL`, `DIA_MES` (1-31) funciona da mesma forma. |
 | `CHECKLISTS` | Gerada automaticamente: cada execução de uma atividade por um agente, com resultado (`CONFORME`/`NAO_CONFORME`/`NAO_SE_APLICA`), fotos antes/depois e o status de validação da Qualidade. |
-| `OCORRENCIAS` | Gerada automaticamente: não conformidades abertas pelos agentes, com o resultado da análise da Qualidade. |
-| `_SEQ` | Interna — controla a numeração dos IDs (CHK-000001, OCO-000001...). Não edite manualmente. |
+| `OCORRENCIAS` | Gerada automaticamente: não conformidades abertas livremente pelos agentes, com o responsável identificado automaticamente (última limpeza registrada no local) e o resultado da análise da Qualidade. |
+| `NAO_CONFORMIDADES` | Gerada automaticamente: inspeções do próprio Admin, já direcionadas a um Agente de Limpeza específico, com a resolução dele e a validação final da Qualidade. |
+| `_SEQ` | Interna — controla a numeração dos IDs (CHK-000001, OCO-000001, NC-000001...). Não edite manualmente. |
 
 Editar locais, ambientes, turnos, atividades e usuários **direto na
 planilha** já reflete no app automaticamente — nada fica fixo no código.

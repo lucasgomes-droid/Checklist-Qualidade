@@ -6,7 +6,7 @@
    ===================================================== */
 
 // >>> COLE AQUI A URL DO SEU APPS SCRIPT WEB APP <<<
-const API_URL = 'https://script.google.com/a/macros/iccbrazil.com.br/s/AKfycbzapb-DouX5q5GN0mqH7jV8uxu3_itDtTeZANDKZqeSbg3uauw4McuXH-a_ffKiCtRa/exec';
+const API_URL = 'https://script.google.com/macros/s/AKfycbzapb-DouX5q5GN0mqH7jV8uxu3_itDtTeZANDKZqeSbg3uauw4McuXH-a_ffKiCtRa/exec';
 
 const OCORRENCIA_STATUS_LABEL = {
   ABERTA: { label: 'Aberta', cls: 'aberta' },
@@ -15,6 +15,13 @@ const OCORRENCIA_STATUS_LABEL = {
   NAO_PROCEDENTE: { label: 'Não procedente', cls: 'finalizada' },
   TRATADA: { label: 'Tratada', cls: 'validacao' },
   ENCERRADA: { label: 'Encerrada', cls: 'finalizada' }
+};
+
+// Status da Não Conformidade (pendência direcionada aberta pelo Admin)
+const NC_STATUS_LABEL = {
+  ABERTA: { label: 'Pendente', cls: 'aberta' },
+  AGUARDANDO_VALIDACAO: { label: 'Aguardando validação', cls: 'validacao' },
+  FINALIZADA: { label: 'Finalizada', cls: 'finalizada' }
 };
 
 const CHECKLIST_STATUS_LABEL = {
@@ -290,12 +297,21 @@ function render() {
     abrirOcorrencia: renderAbrirOcorrencia,
     minhasOcorrencias: renderMinhasOcorrencias,
     historicoAgente: renderHistoricoAgente,
+    minhasPendenciasNC: renderMinhasPendenciasNC,
+    pendenciaNCDetalheAgente: renderPendenciaNCDetalheAgente,
     adminHome: renderAdminHome,
+    painelDia: renderPainelDia,
     validacaoChecklists: renderValidacaoChecklists,
     checklistDetalheAdmin: renderChecklistDetalheAdmin,
     validacaoOcorrencias: renderValidacaoOcorrencias,
     ocorrenciaDetalheAdmin: renderOcorrenciaDetalheAdmin,
+    naoConformidade: renderNaoConformidade,
+    abrirNaoConformidade: renderAbrirNaoConformidade,
+    naoConformidadeDetalheAdmin: renderNaoConformidadeDetalheAdmin,
+    dashboardHub: renderDashboardHub,
     dashChecklist: renderDashChecklist,
+    dashAgenteTurno: renderDashAgenteTurno,
+    dashValidacao: renderDashValidacao,
     dashOcorrencias: renderDashOcorrencias,
     dashFotos: renderDashFotos,
     relatorios: renderRelatorios,
@@ -323,16 +339,19 @@ function updateChrome() {
         { s: 'adminHome', ic: '🏠', label: 'Início' },
         { s: 'validacaoChecklists', ic: '✅', label: 'Checklist' },
         { s: 'validacaoOcorrencias', ic: '⚠️', label: 'Ocorrências' },
-        { s: 'dashChecklist', ic: '📊', label: 'Dashboard' }
+        { s: 'naoConformidade', ic: '🔍', label: 'Não Conf.' },
+        { s: 'dashboardHub', ic: '📊', label: 'Dashboard' }
       ]
     : [
         { s: 'agenteHome', ic: '🏠', label: 'Início' },
         { s: 'novoChecklist', ic: '🧹', label: 'Checklist' },
         { s: 'abrirOcorrencia', ic: '⚠️', label: 'Ocorrência' },
+        { s: 'minhasPendenciasNC', ic: '📌', label: 'Pendências' },
         { s: 'historicoAgente', ic: '🕘', label: 'Histórico' }
       ];
   tabbar.innerHTML = tabs.map(function (t) {
-    const active = S.screen === t.s ? ' is-active' : '';
+    const isDashGroup = t.s === 'dashboardHub' && S.screen.indexOf('dash') === 0;
+    const active = (S.screen === t.s || isDashGroup) ? ' is-active' : '';
     return '<button class="' + active.trim() + '" data-s="' + t.s + '"><span class="ic">' + t.ic + '</span>' + t.label + '</button>';
   }).join('');
   tabbar.querySelectorAll('button').forEach(function (b) {
@@ -619,21 +638,46 @@ function renderChecklistsList(wrap, rows) {
 // ------------------------- AGENTE: ABRIR OCORRÊNCIA -------------------------
 
 async function renderAbrirOcorrencia() {
-  appendHtml(app, screenHeader('Abrir ocorrência', 'Registrar não conformidade'));
+  appendHtml(app, screenHeader('Abrir ocorrência', 'Registrar não conformidade encontrada'));
   const card = el('<div class="card stack"></div>');
   app.appendChild(card);
 
-  const turnoSel = await selectFieldAsync(card, 'getTurnos', 'TURNO', 'Turno');
   const localSel = await selectFieldAsync(card, 'getLocais', 'LOCAL', 'Local');
   const ambienteWrap = el('<div class="field"><label>Ambiente</label><select disabled><option>Selecione o local primeiro…</option></select></div>');
   card.appendChild(ambienteWrap);
   let ambienteSelect = ambienteWrap.querySelector('select');
+
+  // Em vez do agente escolher manualmente um turno, o sistema busca no
+  // histórico de checklists quem foi a última pessoa a limpar este
+  // local+ambiente e mostra isso — é esse turno/agente que fica marcado
+  // como responsável pelo problema encontrado, não quem está relatando.
+  const responsavelWrap = el('<div class="card" style="background:var(--paper);display:none"></div>');
+  card.appendChild(responsavelWrap);
+  let ultimaLimpezaInfo = null;
+
+  async function atualizarResponsavel() {
+    if (!localSel.select.value || !ambienteSelect.value) { responsavelWrap.style.display = 'none'; return; }
+    responsavelWrap.style.display = 'block';
+    responsavelWrap.innerHTML = '<p class="subtle">Buscando última limpeza registrada…</p>';
+    const info = await api('getUltimaLimpeza', { local: localSel.select.value, ambiente: ambienteSelect.value }).catch(function () { return null; });
+    ultimaLimpezaInfo = info;
+    if (info) {
+      responsavelWrap.innerHTML =
+        '<p class="subtle" style="margin-bottom:4px">Responsável identificado pela última limpeza registrada aqui:</p>' +
+        '<div class="row between"><strong>' + escapeHtml(info.agente) + '</strong><span class="tag tag--tratamento">' + escapeHtml(info.turno || 'Turno não informado') + '</span></div>' +
+        '<p class="subtle" style="margin-top:4px">Limpeza em ' + escapeHtml(info.data) + ' às ' + escapeHtml(info.hora) + '</p>';
+    } else {
+      responsavelWrap.innerHTML = '<p class="subtle">Nenhuma limpeza registrada ainda para este local/ambiente — a ocorrência será aberta sem responsável identificado.</p>';
+    }
+  }
 
   localSel.select.addEventListener('change', async function () {
     const ambientes = await api('getAmbientes', { local: localSel.select.value }).catch(function () { return []; });
     ambienteWrap.innerHTML = '<label>Ambiente</label><select id="selAmbiente"><option value="">Selecione…</option>' +
       ambientes.map(function (a) { return '<option value="' + escapeHtml(a.AMBIENTE) + '">' + escapeHtml(a.AMBIENTE) + '</option>'; }).join('') + '</select>';
     ambienteSelect = ambienteWrap.querySelector('select');
+    ambienteSelect.addEventListener('change', atualizarResponsavel);
+    atualizarResponsavel();
   });
 
   const descricao = textField(card, { label: 'Descrição da não conformidade *', multiline: true, placeholder: 'Descreva o que foi encontrado…' });
@@ -649,7 +693,7 @@ async function renderAbrirOcorrencia() {
     btn.disabled = true; btn.textContent = 'Enviando…';
     try {
       await api('createOcorrencia', {
-        turno: turnoSel.select.value, local: localSel.select.value, ambiente: ambienteSelect.value,
+        turno: (S.usuario && S.usuario.TURNO) || '', local: localSel.select.value, ambiente: ambienteSelect.value,
         descricao: descricao.getValue(), foto: foto.getValue(),
         idAgente: S.usuario.ID_USUARIO, agente: S.usuario.NOME
       });
@@ -685,11 +729,17 @@ function renderOcorrenciasList(wrap, rows, onOpen) {
   if (!rows.length) { wrap.appendChild(el('<div class="empty"><span class="ic">📭</span>Nenhuma ocorrência encontrada.</div>')); return; }
   rows.forEach(function (o) {
     const st = OCORRENCIA_STATUS_LABEL[o.STATUS] || { label: o.STATUS, cls: 'aberta' };
+    const responsavelHtml = o.AGENTE_RESPONSAVEL
+      ? '<div class="list-item__sub" style="color:var(--st-risco);font-weight:600;margin-top:2px">Responsável: ' + escapeHtml(o.AGENTE_RESPONSAVEL) + (o.TURNO_RESPONSAVEL ? ' · ' + escapeHtml(o.TURNO_RESPONSAVEL) : '') + '</div>'
+      : '<div class="list-item__sub" style="margin-top:2px">Responsável não identificado</div>';
     const item = el(
       '<button type="button" class="list-item" style="width:100%">' +
-        '<span><span class="shiplabel">' + escapeHtml(o.ID_OCORRENCIA) + '</span>' +
-        '<div class="list-item__title" style="margin-top:6px">' + escapeHtml(o.LOCAL) + ' — ' + escapeHtml(o.AMBIENTE) + '</div>' +
-        '<div class="list-item__sub">' + escapeHtml(o.DATA) + ' ' + escapeHtml(o.HORA) + ' · ' + escapeHtml(o.AGENTE) + '</div></span>' +
+        '<span>' +
+        '<div class="list-item__title">' + escapeHtml(o.LOCAL) + ' — ' + escapeHtml(o.AMBIENTE) + '</div>' +
+        '<div class="list-item__sub" style="margin-top:3px">Aberta por <strong>' + escapeHtml(o.AGENTE) + '</strong> · ' + escapeHtml(o.DATA) + ' ' + escapeHtml(o.HORA) + '</div>' +
+        responsavelHtml +
+        '<div class="shiplabel" style="margin-top:6px">' + escapeHtml(o.ID_OCORRENCIA) + '</div>' +
+        '</span>' +
         '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
       '</button>'
     );
@@ -707,18 +757,20 @@ async function renderHistoricoAgente() {
     '<div class="filters">' +
       '<button class="btn btn--outline btn--sm is-active" data-tab="checklists">Checklists</button>' +
       '<button class="btn btn--outline btn--sm" data-tab="ocorrencias">Ocorrências</button>' +
+      '<button class="btn btn--outline btn--sm" data-tab="naoConformidades">Pendências</button>' +
     '</div>'
   );
   app.appendChild(tabsWrap);
   const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
   app.appendChild(listWrap);
 
-  const hist = await api('getHistoricoAgente', { idAgente: S.usuario.ID_USUARIO }).catch(function () { return { checklists: [], ocorrencias: [] }; });
+  const hist = await api('getHistoricoAgente', { idAgente: S.usuario.ID_USUARIO }).catch(function () { return { checklists: [], ocorrencias: [], naoConformidades: [] }; });
 
   function showTab(tab) {
     tabsWrap.querySelectorAll('button').forEach(function (b) { b.classList.toggle('is-active', b.dataset.tab === tab); });
     if (tab === 'checklists') renderChecklistsList(listWrap, hist.checklists);
-    else renderOcorrenciasList(listWrap, hist.ocorrencias);
+    else if (tab === 'ocorrencias') renderOcorrenciasList(listWrap, hist.ocorrencias);
+    else renderNCListAgente(listWrap, hist.naoConformidades);
   }
   tabsWrap.querySelectorAll('button').forEach(function (b) { b.onclick = function () { showTab(b.dataset.tab); }; });
   showTab('checklists');
@@ -728,43 +780,87 @@ async function renderHistoricoAgente() {
 
 async function renderAdminHome() {
   appendHtml(app, screenHeader('Painel da Qualidade', 'Olá, ' + S.usuario.NOME));
-  const body = el('<div class="stack" id="body" style="margin-top:4px"><p class="subtle">Carregando painel do dia…</p></div>');
+  const body = el('<div class="stack" id="body" style="margin-top:4px"><p class="subtle">Carregando resumo do dia…</p></div>');
   app.appendChild(body);
 
   const painel = await api('getPainelHoje', {}).catch(function () { return null; });
   body.innerHTML = '';
   if (painel) {
-    body.appendChild(el(
+    const card = el('<button type="button" class="card stack" style="width:100%;text-align:left;cursor:pointer"></button>');
+    card.appendChild(el('<div class="row between"><h3 class="title-lg">Hoje · ' + escapeHtml(painel.data) + '</h3><span>›</span></div>'));
+    card.appendChild(el(
       '<div class="kpi-grid">' +
-        kpi(painel.total, 'Previstas hoje') +
+        kpi(painel.total, 'Previstas') +
         kpi(painel.realizados, 'Realizadas') +
         kpi(painel.pendentes, 'Pendentes') +
-        kpi(painel.data, 'Data') +
       '</div>'
     ));
-    if (painel.pendentes > 0) {
-      const pendCard = el('<div class="card stack"><h3 class="title-lg">Ainda pendentes hoje</h3></div>');
-      body.appendChild(pendCard);
-      painel.itens.filter(function (i) { return !i.realizado; }).slice(0, 15).forEach(function (i) {
-        pendCard.appendChild(el(
-          '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--line)">' +
-            '<span><strong>' + escapeHtml(i.atividade) + '</strong><div class="subtle">' + escapeHtml(i.local) + ' · ' + escapeHtml(i.ambiente) + (i.turno ? ' · ' + escapeHtml(i.turno) : '') + '</div></span>' +
-            '<span class="tag tag--aberta">Pendente</span>' +
-          '</div>'
-        ));
-      });
-    }
+    card.appendChild(el('<span class="subtle">Toque para ver o detalhe do que ainda falta hoje</span>'));
+    card.onclick = function () { go('painelDia'); };
+    body.appendChild(card);
   }
 
   appendHtml(app, '<div class="stack" style="margin-top:14px">' +
     menuCard('✅', 'Validar checklists', 'Aprovar ou reprovar limpezas enviadas', 'validacaoChecklists') +
-    menuCard('⚠️', 'Validar ocorrências', 'Analisar não conformidades registradas', 'validacaoOcorrencias') +
-    menuCard('📊', 'Dashboard da qualidade', 'Indicadores gerais de cumprimento', 'dashChecklist') +
-    menuCard('⚠️', 'Dashboard de ocorrências', 'Indicadores das ocorrências', 'dashOcorrencias') +
-    menuCard('📷', 'Evidências fotográficas', 'Indicadores de fotos antes/depois', 'dashFotos') +
+    menuCard('⚠️', 'Validar ocorrências', 'Analisar não conformidades relatadas pelos agentes', 'validacaoOcorrencias') +
+    menuCard('🔍', 'Não Conformidade', 'Inspecionar um local e direcionar a um agente', 'naoConformidade') +
+    menuCard('📊', 'Dashboards', 'Indicadores de limpeza, validação e ocorrências', 'dashboardHub') +
     menuCard('📄', 'Relatórios', 'Exportar dados em CSV ou PDF', 'relatorios') +
   '</div>');
   bindMenuCards();
+}
+
+// ------------------------- ADMIN: PAINEL DO DIA (detalhe) -------------------------
+
+async function renderPainelDia() {
+  appendHtml(app,
+    screenHeader('Painel do dia', 'Checklist da Qualidade') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('adminHome'); };
+
+  const body = el('<div class="stack" id="body" style="margin-top:4px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(body);
+
+  const painel = await api('getPainelHoje', {}).catch(function () { return null; });
+  body.innerHTML = '';
+  if (!painel) return;
+
+  body.appendChild(el(
+    '<div class="kpi-grid">' +
+      kpi(painel.total, 'Previstas hoje') +
+      kpi(painel.realizados, 'Realizadas') +
+      kpi(painel.pendentes, 'Pendentes') +
+      kpi(painel.data, 'Data') +
+    '</div>'
+  ));
+
+  const filterWrap = el(
+    '<div class="filters">' +
+      '<button class="btn btn--outline btn--sm is-active" data-f="pendentes">Só pendentes</button>' +
+      '<button class="btn btn--outline btn--sm" data-f="todas">Todas</button>' +
+    '</div>'
+  );
+  body.appendChild(filterWrap);
+  const listCard = el('<div class="card stack"></div>');
+  body.appendChild(listCard);
+
+  function showList(filtro) {
+    filterWrap.querySelectorAll('button').forEach(function (b) { b.classList.toggle('is-active', b.dataset.f === filtro); });
+    listCard.innerHTML = '';
+    const itens = filtro === 'pendentes' ? painel.itens.filter(function (i) { return !i.realizado; }) : painel.itens;
+    if (!itens.length) { listCard.appendChild(el('<div class="empty"><span class="ic">✅</span>Nada pendente por aqui.</div>')); return; }
+    itens.forEach(function (i) {
+      listCard.appendChild(el(
+        '<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)">' +
+          '<span><strong>' + escapeHtml(i.atividade) + '</strong><div class="subtle">' + escapeHtml(i.local) + ' · ' + escapeHtml(i.ambiente) + (i.turno ? ' · ' + escapeHtml(i.turno) : '') + '</div></span>' +
+          (i.realizado ? '<span class="tag tag--finalizada">Feito ' + escapeHtml(i.hora) + '</span>' : '<span class="tag tag--aberta">Pendente</span>') +
+        '</div>'
+      ));
+    });
+  }
+  filterWrap.querySelectorAll('button').forEach(function (b) { b.onclick = function () { showList(b.dataset.f); }; });
+  showList('pendentes');
 }
 
 // ------------------------- ADMIN: VALIDAÇÃO DE CHECKLISTS -------------------------
@@ -929,10 +1025,23 @@ async function renderOcorrenciaDetalheAdmin() {
 
   const card = el('<div class="card stack"></div>');
   app.appendChild(card);
-  card.appendChild(el('<div class="row between"><span class="subtle">Agente</span><strong>' + escapeHtml(o.AGENTE) + '</strong></div>'));
-  card.appendChild(el('<div class="row between"><span class="subtle">Turno / Data</span><strong>' + escapeHtml(o.TURNO || '-') + ' · ' + escapeHtml(o.DATA) + ' ' + escapeHtml(o.HORA) + '</strong></div>'));
+  card.appendChild(el('<div class="row between"><span class="subtle">Aberta por</span><strong>' + escapeHtml(o.AGENTE) + '</strong></div>'));
+  card.appendChild(el('<div class="row between"><span class="subtle">Data / hora</span><strong>' + escapeHtml(o.DATA) + ' ' + escapeHtml(o.HORA) + '</strong></div>'));
   card.appendChild(el('<p class="subtle">' + escapeHtml(o.DESCRICAO) + '</p>'));
   if (o.FOTO) card.appendChild(el('<img class="photo-preview" src="' + escapeHtml(o.FOTO) + '">'));
+
+  card.appendChild(el('<div class="divider"></div>'));
+  if (o.AGENTE_RESPONSAVEL) {
+    card.appendChild(el(
+      '<div class="stack" style="background:var(--paper);border-radius:var(--radius);padding:10px">' +
+        '<span class="subtle">Responsável identificado (última limpeza registrada no local)</span>' +
+        '<div class="row between"><strong>' + escapeHtml(o.AGENTE_RESPONSAVEL) + '</strong><span class="tag tag--tratamento">' + escapeHtml(o.TURNO_RESPONSAVEL || '-') + '</span></div>' +
+        (o.DATA_ULTIMA_LIMPEZA ? '<span class="subtle">Limpeza em ' + escapeHtml(o.DATA_ULTIMA_LIMPEZA) + '</span>' : '') +
+      '</div>'
+    ));
+  } else {
+    card.appendChild(el('<p class="subtle" style="color:var(--st-risco)">Nenhum responsável identificado — não há registro de limpeza para este local/ambiente.</p>'));
+  }
 
   if (o.STATUS !== 'ABERTA' && o.STATUS !== 'EM_ANALISE') {
     card.appendChild(el('<div class="divider"></div>'));
@@ -973,6 +1082,267 @@ async function renderOcorrenciaDetalheAdmin() {
   }
   btnProcedente.onclick = submit(true);
   btnNaoProcedente.onclick = submit(false);
+}
+
+// ------------------------- ADMIN: NÃO CONFORMIDADE -------------------------
+// Diferente de "Ocorrências" (aberta livremente pelo agente), aqui é o
+// Administrador que inspeciona o local e já direciona o problema encontrado
+// a um Agente de Limpeza específico — funciona como uma pendência.
+
+async function renderNaoConformidade() {
+  appendHtml(app, screenHeader('Não Conformidade', 'Inspeção da Qualidade'));
+  const btnNova = el('<button class="btn btn--primary btn--block">+ Abrir nova não conformidade</button>');
+  app.appendChild(btnNova);
+  btnNova.onclick = function () { go('abrirNaoConformidade'); };
+
+  const filterWrap = el(
+    '<div class="filters" style="margin-top:12px">' +
+      '<select id="fStatus">' +
+        '<option value="ABERTA">Pendentes (com agente)</option>' +
+        '<option value="AGUARDANDO_VALIDACAO">Aguardando validação</option>' +
+        '<option value="FINALIZADA">Finalizadas</option>' +
+        '<option value="">Todos os status</option>' +
+      '</select>' +
+    '</div>'
+  );
+  app.appendChild(filterWrap);
+  const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(listWrap);
+
+  async function load() {
+    listWrap.innerHTML = '<p class="subtle">Carregando…</p>';
+    const rows = await api('getNaoConformidades', { status: document.getElementById('fStatus').value }).catch(function () { return []; });
+    listWrap.innerHTML = '';
+    if (!rows.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🔍</span>Nenhuma não conformidade encontrada.</div>')); return; }
+    rows.forEach(function (n) {
+      const st = NC_STATUS_LABEL[n.STATUS] || { label: n.STATUS, cls: 'aberta' };
+      const item = el(
+        '<button type="button" class="list-item" style="width:100%">' +
+          '<span>' +
+          '<div class="list-item__title">' + escapeHtml(n.LOCAL) + ' — ' + escapeHtml(n.AMBIENTE) + '</div>' +
+          '<div class="list-item__sub" style="margin-top:3px">Direcionada a <strong>' + escapeHtml(n.AGENTE_RESPONSAVEL) + '</strong></div>' +
+          '<div class="list-item__sub">' + escapeHtml(n.DATA) + ' ' + escapeHtml(n.HORA) + ' · aberta por ' + escapeHtml(n.ADMIN_ABRIU) + '</div>' +
+          '<div class="shiplabel" style="margin-top:6px">' + escapeHtml(n.ID_NC) + '</div>' +
+          '</span>' +
+          '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
+        '</button>'
+      );
+      item.onclick = function () { go('naoConformidadeDetalheAdmin', { ncAtual: n }); };
+      listWrap.appendChild(item);
+    });
+  }
+  document.getElementById('fStatus').onchange = load;
+  load();
+}
+
+async function renderAbrirNaoConformidade() {
+  appendHtml(app,
+    screenHeader('Não Conformidade', 'Nova inspeção') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('naoConformidade'); };
+
+  const card = el('<div class="card stack"></div>');
+  app.appendChild(card);
+
+  const localSel = await selectFieldAsync(card, 'getLocais', 'LOCAL', 'Local');
+  const ambienteWrap = el('<div class="field"><label>Ambiente</label><select disabled><option>Selecione o local primeiro…</option></select></div>');
+  card.appendChild(ambienteWrap);
+  let ambienteSelect = ambienteWrap.querySelector('select');
+
+  const responsavelWrap = el('<div class="field"><label>Agente responsável *</label><select disabled><option>Selecione local e ambiente primeiro…</option></select></div>');
+  card.appendChild(responsavelWrap);
+  let responsavelSelect = responsavelWrap.querySelector('select');
+  const sugestaoInfo = el('<p class="subtle" style="display:none"></p>');
+  card.appendChild(sugestaoInfo);
+
+  const usuarios = await api('getUsuarios', {}).catch(function () { return []; });
+  const agentes = usuarios.filter(function (u) { return u.PERFIL === 'AGENTE_LIMPEZA'; });
+
+  async function atualizarResponsavel() {
+    if (!localSel.select.value || !ambienteSelect.value) return;
+    responsavelWrap.innerHTML = '<label>Agente responsável *</label><select id="selResponsavel"><option value="">Selecione…</option>' +
+      agentes.map(function (a) { return '<option value="' + escapeHtml(a.ID_USUARIO) + '">' + escapeHtml(a.NOME) + '</option>'; }).join('') + '</select>';
+    responsavelSelect = responsavelWrap.querySelector('select');
+
+    const info = await api('getUltimaLimpeza', { local: localSel.select.value, ambiente: ambienteSelect.value }).catch(function () { return null; });
+    if (info) {
+      responsavelSelect.value = info.idAgente;
+      sugestaoInfo.style.display = 'block';
+      sugestaoInfo.textContent = 'Sugestão automática: ' + info.agente + ' foi quem limpou aqui por último (' + info.turno + ', ' + info.data + ' ' + info.hora + '). Pode trocar se necessário.';
+    } else {
+      sugestaoInfo.style.display = 'block';
+      sugestaoInfo.textContent = 'Nenhuma limpeza anterior encontrada aqui — selecione manualmente o responsável.';
+    }
+  }
+
+  localSel.select.addEventListener('change', async function () {
+    const ambientes = await api('getAmbientes', { local: localSel.select.value }).catch(function () { return []; });
+    ambienteWrap.innerHTML = '<label>Ambiente</label><select id="selAmbiente"><option value="">Selecione…</option>' +
+      ambientes.map(function (a) { return '<option value="' + escapeHtml(a.AMBIENTE) + '">' + escapeHtml(a.AMBIENTE) + '</option>'; }).join('') + '</select>';
+    ambienteSelect = ambienteWrap.querySelector('select');
+    ambienteSelect.addEventListener('change', atualizarResponsavel);
+  });
+
+  const descricao = textField(card, { label: 'Descrição da não conformidade *', multiline: true, placeholder: 'Descreva o que foi encontrado na inspeção…' });
+  const foto = photoField(card, { label: 'Foto (opcional)' });
+
+  const btn = el('<button class="btn btn--primary btn--block" style="margin-top:6px">Direcionar ao agente</button>');
+  card.appendChild(btn);
+  btn.onclick = async function () {
+    if (!localSel.select.value || !ambienteSelect.value || !responsavelSelect.value || !descricao.getValue()) {
+      toast('Preencha local, ambiente, responsável e descrição.', true);
+      return;
+    }
+    const agenteObj = agentes.find(function (a) { return a.ID_USUARIO === responsavelSelect.value; });
+    btn.disabled = true; btn.textContent = 'Enviando…';
+    try {
+      await api('createNaoConformidade', {
+        local: localSel.select.value, ambiente: ambienteSelect.value, descricao: descricao.getValue(), foto: foto.getValue(),
+        idAgenteResponsavel: responsavelSelect.value, agenteResponsavel: agenteObj ? agenteObj.NOME : '',
+        adminAbriu: S.usuario.NOME
+      });
+      toast('Não conformidade direcionada!', false, true);
+      go('naoConformidade');
+    } catch (e) { btn.disabled = false; btn.textContent = 'Direcionar ao agente'; }
+  };
+}
+
+async function renderNaoConformidadeDetalheAdmin() {
+  const n = S.ncAtual;
+  appendHtml(app,
+    screenHeader('Não Conformidade ' + n.ID_NC, n.LOCAL + ' · ' + n.AMBIENTE) +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('naoConformidade'); };
+
+  const card = el('<div class="card stack"></div>');
+  app.appendChild(card);
+  card.appendChild(el('<div class="row between"><span class="subtle">Direcionada a</span><strong>' + escapeHtml(n.AGENTE_RESPONSAVEL) + '</strong></div>'));
+  card.appendChild(el('<div class="row between"><span class="subtle">Aberta por</span><strong>' + escapeHtml(n.ADMIN_ABRIU) + '</strong></div>'));
+  card.appendChild(el('<div class="row between"><span class="subtle">Data / hora</span><strong>' + escapeHtml(n.DATA) + ' ' + escapeHtml(n.HORA) + '</strong></div>'));
+  card.appendChild(el('<p class="subtle">' + escapeHtml(n.DESCRICAO) + '</p>'));
+  if (n.FOTO) card.appendChild(el('<img class="photo-preview" src="' + escapeHtml(n.FOTO) + '">'));
+
+  if (n.STATUS === 'ABERTA') {
+    card.appendChild(el('<div class="divider"></div>'));
+    card.appendChild(el('<p class="subtle">Aguardando o agente resolver e enviar foto de comprovação.</p>'));
+    return;
+  }
+
+  card.appendChild(el('<div class="divider"></div>'));
+  card.appendChild(el('<strong>Resolução do agente</strong>'));
+  if (n.DESCRICAO_RESOLUCAO) card.appendChild(el('<p class="subtle">' + escapeHtml(n.DESCRICAO_RESOLUCAO) + '</p>'));
+  if (n.FOTO_RESOLUCAO) card.appendChild(el('<img class="photo-preview" src="' + escapeHtml(n.FOTO_RESOLUCAO) + '">'));
+  card.appendChild(el('<span class="subtle">Resolvido em ' + escapeHtml(n.DATA_RESOLUCAO) + '</span>'));
+
+  if (n.STATUS === 'FINALIZADA') {
+    card.appendChild(el('<div class="divider"></div>'));
+    card.appendChild(el('<div class="row between"><span class="subtle">Validado por</span><strong>' + escapeHtml(n.ADMIN_VALIDADOR || '-') + '</strong></div>'));
+    return;
+  }
+
+  const actWrap = el('<div class="card stack"><h3 class="title-lg">Validar resolução</h3></div>');
+  app.appendChild(actWrap);
+  const row = el('<div class="row" style="gap:10px"></div>');
+  actWrap.appendChild(row);
+  const btnAprovar = el('<button class="btn btn--primary" style="flex:1">Aprovar</button>');
+  const btnReprovar = el('<button class="btn btn--danger" style="flex:1">Reprovar</button>');
+  row.appendChild(btnAprovar); row.appendChild(btnReprovar);
+  const motivoWrap = el('<div class="stack" style="display:none;margin-top:10px"></div>');
+  actWrap.appendChild(motivoWrap);
+
+  btnAprovar.onclick = async function () {
+    await api('validarNaoConformidade', { idNc: n.ID_NC, aprovado: true, adminValidador: S.usuario.NOME });
+    toast('Não conformidade finalizada.', false, true);
+    go('naoConformidade');
+  };
+  btnReprovar.onclick = function () {
+    motivoWrap.style.display = 'flex';
+    motivoWrap.innerHTML = '';
+    const motivo = textField(motivoWrap, { label: 'O que ainda falta corrigir? *', multiline: true });
+    const btnConfirmar = el('<button class="btn btn--danger btn--block">Confirmar e devolver ao agente</button>');
+    motivoWrap.appendChild(btnConfirmar);
+    btnConfirmar.onclick = async function () {
+      if (!motivo.getValue()) { toast('Descreva o que falta corrigir.', true); return; }
+      await api('validarNaoConformidade', { idNc: n.ID_NC, aprovado: false, adminValidador: S.usuario.NOME, motivo: motivo.getValue() });
+      toast('Devolvido ao agente.', false, true);
+      go('naoConformidade');
+    };
+  };
+}
+
+// ------------------------- AGENTE: MINHAS PENDÊNCIAS (Não Conformidade) -------------------------
+
+async function renderMinhasPendenciasNC() {
+  appendHtml(app, screenHeader('Minhas pendências', 'Não conformidades direcionadas a você'));
+  const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(listWrap);
+  const rows = await api('getNaoConformidades', { idAgenteResponsavel: S.usuario.ID_USUARIO }).catch(function () { return []; });
+  renderNCListAgente(listWrap, rows);
+}
+
+function renderNCListAgente(wrap, rows) {
+  wrap.innerHTML = '';
+  if (!rows.length) { wrap.appendChild(el('<div class="empty"><span class="ic">✅</span>Nenhuma pendência direcionada a você.</div>')); return; }
+  rows.forEach(function (n) {
+    const st = NC_STATUS_LABEL[n.STATUS] || { label: n.STATUS, cls: 'aberta' };
+    const item = el(
+      '<button type="button" class="list-item" style="width:100%">' +
+        '<span>' +
+        '<div class="list-item__title">' + escapeHtml(n.LOCAL) + ' — ' + escapeHtml(n.AMBIENTE) + '</div>' +
+        '<div class="list-item__sub" style="margin-top:3px">' + escapeHtml(n.DESCRICAO).slice(0, 60) + (n.DESCRICAO.length > 60 ? '…' : '') + '</div>' +
+        '<div class="list-item__sub">' + escapeHtml(n.DATA) + ' ' + escapeHtml(n.HORA) + '</div>' +
+        '</span>' +
+        '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
+      '</button>'
+    );
+    item.onclick = function () { go('pendenciaNCDetalheAgente', { ncAtual: n }); };
+    wrap.appendChild(item);
+  });
+}
+
+async function renderPendenciaNCDetalheAgente() {
+  const n = S.ncAtual;
+  appendHtml(app,
+    screenHeader('Pendência ' + n.ID_NC, n.LOCAL + ' · ' + n.AMBIENTE) +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('minhasPendenciasNC'); };
+
+  const card = el('<div class="card stack"></div>');
+  app.appendChild(card);
+  card.appendChild(el('<div class="row between"><span class="subtle">Identificada em</span><strong>' + escapeHtml(n.DATA) + ' ' + escapeHtml(n.HORA) + '</strong></div>'));
+  card.appendChild(el('<p class="subtle">' + escapeHtml(n.DESCRICAO) + '</p>'));
+  if (n.FOTO) card.appendChild(el('<img class="photo-preview" src="' + escapeHtml(n.FOTO) + '">'));
+  if (n.MOTIVO_REPROVACAO) card.appendChild(el('<p class="subtle" style="color:var(--st-risco)">Retornou da Qualidade: ' + escapeHtml(n.MOTIVO_REPROVACAO) + '</p>'));
+
+  if (n.STATUS === 'AGUARDANDO_VALIDACAO') {
+    card.appendChild(el('<div class="divider"></div>'));
+    card.appendChild(el('<p class="subtle">Você já enviou a resolução — aguardando validação da Qualidade.</p>'));
+    return;
+  }
+  if (n.STATUS === 'FINALIZADA') {
+    card.appendChild(el('<div class="divider"></div>'));
+    card.appendChild(el('<p class="subtle" style="color:var(--st-finalizada)">✓ Finalizada.</p>'));
+    return;
+  }
+
+  const actWrap = el('<div class="card stack"><h3 class="title-lg">Resolver</h3></div>');
+  app.appendChild(actWrap);
+  const descricao = textField(actWrap, { label: 'O que foi feito para corrigir *', multiline: true });
+  const foto = photoField(actWrap, { label: 'Foto de comprovação *', required: true });
+  const btn = el('<button class="btn btn--primary btn--block">Enviar resolução</button>');
+  actWrap.appendChild(btn);
+  btn.onclick = async function () {
+    if (!descricao.getValue() || !foto.getValue()) { toast('Descreva o que foi feito e envie uma foto.', true); return; }
+    btn.disabled = true; btn.textContent = 'Enviando…';
+    try {
+      await api('resolverNaoConformidade', { idNc: n.ID_NC, descricaoResolucao: descricao.getValue(), fotoResolucao: foto.getValue() });
+      toast('Resolução enviada!', false, true);
+      go('minhasPendenciasNC');
+    } catch (e) { btn.disabled = false; btn.textContent = 'Enviar resolução'; }
+  };
 }
 
 // ------------------------- DASHBOARD HELPERS -------------------------
@@ -1041,8 +1411,30 @@ function lerRangeFiltro() {
 
 // ------------------------- DASHBOARD — CHECKLIST DA QUALIDADE -------------------------
 
+// ------------------------- DASHBOARD — HUB (menu central) -------------------------
+
+function renderDashboardHub() {
+  appendHtml(app, screenHeader('Dashboards', 'Checklist da Qualidade') + '<div class="stack"></div>');
+  const wrap = app.querySelector('.stack:last-child');
+  wrap.appendChild(el(menuCard('🧹', 'Checklist de Limpeza', 'Previsto, realizado, pendente e atrasado — por local', 'dashChecklist')));
+  wrap.appendChild(el(menuCard('👥', 'Por Agente e Turno', 'Realizados agrupados por agente e por turno', 'dashAgenteTurno')));
+  wrap.appendChild(el(menuCard('✅', 'Validação da Qualidade', 'Aprovados, reprovados e não conformidades', 'dashValidacao')));
+  wrap.appendChild(el(menuCard('🔄', 'Ocorrências entre Turnos', 'Ocorrências abertas de um turno para outro', 'dashOcorrencias')));
+  wrap.appendChild(el(menuCard('📷', 'Evidências Fotográficas', 'Fotos antes/depois e status de aprovação', 'dashFotos')));
+  bindMenuCards();
+}
+
+function dashBackButton(voltarPara) {
+  const btn = el('<button class="btn btn--outline btn--sm" id="btnVoltarDash" style="align-self:flex-start;margin-top:-8px">← Dashboards</button>');
+  app.appendChild(btn);
+  btn.onclick = function () { go(voltarPara || 'dashboardHub'); };
+}
+
+// ------------------------- DASHBOARD 1 — CHECKLIST DE LIMPEZA -------------------------
+
 async function renderDashChecklist() {
-  appendHtml(app, screenHeader('Dashboard da Qualidade', 'Checklist da Qualidade'));
+  appendHtml(app, screenHeader('Checklist de Limpeza', 'Previsto · Realizado · Pendente'));
+  dashBackButton();
   const filterWrap = filtroDashboard();
   app.appendChild(filterWrap);
   const customWrap = el('<div class="filters" id="customDates" style="display:none"><input type="date" id="fDataInicial"><input type="date" id="fDataFinal"><button class="btn btn--outline btn--sm" id="btnAplicar">Aplicar</button></div>');
@@ -1071,41 +1463,18 @@ async function renderDashChecklist() {
     body.innerHTML = '';
     if (!d) return;
 
-    let comparativo = '';
-    if (selPeriodo.value !== 'tudo') {
-      const rAnt = periodoAnteriorRange(range);
-      if (rAnt) {
-        const dAnt = await api('getDashboardChecklist', { local: selLocal.value, ambiente: selAmbiente.value, turno: selTurno.value, dataInicial: rAnt.dataInicial, dataFinal: rAnt.dataFinal }).catch(function () { return null; });
-        if (dAnt) comparativo = comparativoBadge(d.naoConformidades, dAnt.naoConformidades, true);
-      }
-    }
-
     body.appendChild(el(
       '<div class="kpi-grid">' +
         kpi(d.totalPrevisto, 'Previstos') +
         kpi(d.realizados, 'Realizados') +
         kpi(d.pendentes, 'Pendentes') +
         kpi(d.atrasados, 'Atrasados') +
-        kpi(d.aprovados, 'Aprovados') +
-        kpi(d.reprovados, 'Reprovados') +
         kpi(d.percentualCumprimento + '%', '% Cumprimento') +
-        kpi(d.percentualAprovacao + '%', '% Aprovação') +
       '</div>'
     ));
-    body.appendChild(el(
-      '<div class="kpi-grid">' +
-        kpi(d.naoConformidades, 'Não conformidades') +
-        kpi(d.totalOcorrencias, 'Ocorrências no período') +
-      '</div>'
-    ));
-    if (comparativo) body.appendChild(el('<div style="margin-top:-4px">' + comparativo + '</div>'));
 
-    body.appendChild(barCard('Realizados por Agente de Limpeza', d.porAgente));
     body.appendChild(barCard('Realizados por Local', d.porLocal));
     body.appendChild(barCard('Realizados por Ambiente', d.porAmbiente));
-    body.appendChild(barCard('Realizados por Turno', d.porTurno));
-    body.appendChild(barCard('Ocorrências por Local (locais com mais problemas)', d.ocorrenciasPorLocal));
-    body.appendChild(barCard('Ocorrências por Ambiente', d.ocorrenciasPorAmbiente));
 
     if (d.registros.length) {
       const listCard = el('<div class="card stack"><h3 class="title-lg">Registros recentes</h3></div>');
@@ -1114,7 +1483,7 @@ async function renderDashChecklist() {
       listCard.appendChild(tableWrap);
       const recentes = d.registros.slice().sort(function (a, b) { return b.ID_CHECKLIST.localeCompare(a.ID_CHECKLIST); }).slice(0, 15);
       tableWrap.appendChild(buildPreviewTable(
-        [['DATA', 'Data'], ['LOCAL', 'Local'], ['AMBIENTE', 'Ambiente'], ['ATIVIDADE', 'Atividade'], ['AGENTE', 'Agente'], ['RESULTADO', 'Resultado'], ['STATUS', 'Status']],
+        [['DATA', 'Data'], ['LOCAL', 'Local'], ['AMBIENTE', 'Ambiente'], ['ATIVIDADE', 'Atividade'], ['STATUS', 'Status']],
         recentes
       ));
     }
@@ -1122,10 +1491,102 @@ async function renderDashChecklist() {
   load();
 }
 
-// ------------------------- DASHBOARD — OCORRÊNCIAS -------------------------
+// ------------------------- DASHBOARD 2 — POR AGENTE E TURNO -------------------------
+
+async function renderDashAgenteTurno() {
+  appendHtml(app, screenHeader('Por Agente e Turno', 'Checklist de Limpeza'));
+  dashBackButton();
+  const filterWrap = filtroDashboard();
+  app.appendChild(filterWrap);
+  const customWrap = el('<div class="filters" id="customDates" style="display:none"><input type="date" id="fDataInicial"><input type="date" id="fDataFinal"><button class="btn btn--outline btn--sm" id="btnAplicar">Aplicar</button></div>');
+  app.appendChild(customWrap);
+  const body = el('<div class="stack" id="body" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(body);
+
+  const selLocal = document.getElementById('fLocal'), selAmbiente = document.getElementById('fAmbiente'), selTurno = document.getElementById('fTurno');
+  await preencherFiltrosLocalAmbienteTurno(selLocal, selAmbiente, selTurno);
+
+  const selPeriodo = document.getElementById('fPeriodo');
+  selPeriodo.onchange = function () {
+    customWrap.style.display = selPeriodo.value === 'custom' ? 'flex' : 'none';
+    if (selPeriodo.value !== 'custom') load();
+  };
+  document.getElementById('btnAplicar').onclick = load;
+  selLocal.onchange = load; selAmbiente.onchange = load; selTurno.onchange = load;
+
+  async function load() {
+    body.innerHTML = '<p class="subtle">Carregando…</p>';
+    const range = lerRangeFiltro();
+    const d = await api('getDashboardChecklist', {
+      local: selLocal.value, ambiente: selAmbiente.value, turno: selTurno.value,
+      dataInicial: range.dataInicial, dataFinal: range.dataFinal
+    }).catch(function () { return null; });
+    body.innerHTML = '';
+    if (!d) return;
+
+    body.appendChild(el('<div class="kpi-grid">' + kpi(d.realizados, 'Total realizados') + '</div>'));
+    body.appendChild(barCard('Realizados por Agente de Limpeza', d.porAgente));
+    body.appendChild(barCard('Realizados por Turno', d.porTurno));
+  }
+  load();
+}
+
+// ------------------------- DASHBOARD 3 — VALIDAÇÃO DA QUALIDADE -------------------------
+
+async function renderDashValidacao() {
+  appendHtml(app, screenHeader('Validação da Qualidade', 'Aprovados · Reprovados · Não Conformidades'));
+  dashBackButton();
+  const filterWrap = filtroDashboard();
+  app.appendChild(filterWrap);
+  const customWrap = el('<div class="filters" id="customDates" style="display:none"><input type="date" id="fDataInicial"><input type="date" id="fDataFinal"><button class="btn btn--outline btn--sm" id="btnAplicar">Aplicar</button></div>');
+  app.appendChild(customWrap);
+  const body = el('<div class="stack" id="body" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(body);
+
+  const selLocal = document.getElementById('fLocal'), selAmbiente = document.getElementById('fAmbiente'), selTurno = document.getElementById('fTurno');
+  await preencherFiltrosLocalAmbienteTurno(selLocal, selAmbiente, selTurno);
+
+  const selPeriodo = document.getElementById('fPeriodo');
+  selPeriodo.onchange = function () {
+    customWrap.style.display = selPeriodo.value === 'custom' ? 'flex' : 'none';
+    if (selPeriodo.value !== 'custom') load();
+  };
+  document.getElementById('btnAplicar').onclick = load;
+  selLocal.onchange = load; selAmbiente.onchange = load; selTurno.onchange = load;
+
+  async function load() {
+    body.innerHTML = '<p class="subtle">Carregando…</p>';
+    const range = lerRangeFiltro();
+    const d = await api('getDashboardChecklist', {
+      local: selLocal.value, ambiente: selAmbiente.value, turno: selTurno.value,
+      dataInicial: range.dataInicial, dataFinal: range.dataFinal
+    }).catch(function () { return null; });
+    body.innerHTML = '';
+    if (!d) return;
+
+    body.appendChild(el(
+      '<div class="kpi-grid">' +
+        kpi(d.aprovados, 'Aprovados') +
+        kpi(d.reprovados, 'Reprovados') +
+        kpi(d.naoConformidades, 'Não conformidades') +
+        kpi(d.totalNaoConformidadesQualidade, 'Não conf. da Qualidade') +
+        kpi(d.percentualAprovacao + '%', '% Aprovação') +
+      '</div>'
+    ));
+
+    body.appendChild(barCard('Aprovados por Agente', d.aprovadosPorAgente));
+    body.appendChild(barCard('Reprovados por Agente', d.reprovadosPorAgente));
+    body.appendChild(barCard('Aprovados por Turno', d.aprovadosPorTurno));
+    body.appendChild(barCard('Reprovados por Turno', d.reprovadosPorTurno));
+  }
+  load();
+}
+
+// ------------------------- DASHBOARD 4 — OCORRÊNCIAS ENTRE TURNOS -------------------------
 
 async function renderDashOcorrencias() {
-  appendHtml(app, screenHeader('Dashboard de Ocorrências', 'Checklist da Qualidade'));
+  appendHtml(app, screenHeader('Ocorrências entre Turnos', 'Abertas de um turno para outro'));
+  dashBackButton();
   const filterWrap = filtroDashboard();
   app.appendChild(filterWrap);
   const customWrap = el('<div class="filters" id="customDates" style="display:none"><input type="date" id="fDataInicial"><input type="date" id="fDataFinal"><button class="btn btn--outline btn--sm" id="btnAplicar">Aplicar</button></div>');
@@ -1154,22 +1615,23 @@ async function renderDashOcorrencias() {
     body.appendChild(el(
       '<div class="kpi-grid">' +
         kpi(d.total, 'Total') +
+        kpi(d.totalEntreTurnos, 'Entre turnos') +
         kpi(d.pendentes, 'Pendentes') +
         kpi(d.procedentes, 'Procedentes') +
         kpi(d.naoProcedentes, 'Não procedentes') +
       '</div>'
     ));
-    body.appendChild(barCard('Por Agente de Limpeza', d.porAgente));
-    body.appendChild(barCard('Por Local', d.porLocal));
-    body.appendChild(barCard('Por Ambiente', d.porAmbiente));
-    body.appendChild(barCard('Por Turno', d.porTurno));
 
-    if (d.registros.length) {
-      const listCard = el('<div class="card stack"><h3 class="title-lg">Ocorrências recentes</h3></div>');
+    body.appendChild(barCard('Abertas por Turno (quem relatou)', d.porTurnoAbertura));
+    body.appendChild(barCard('Direcionadas ao Turno (responsável identificado)', d.porTurnoResponsavel));
+    body.appendChild(barCard('Por Agente Responsável', d.porAgenteResponsavel));
+
+    if (d.registrosEntreTurnos.length) {
+      const listCard = el('<div class="card stack"><h3 class="title-lg">Ocorrências entre turnos</h3></div>');
       body.appendChild(listCard);
       const inner = el('<div class="stack"></div>');
       listCard.appendChild(inner);
-      renderOcorrenciasList(inner, d.registros.slice(0, 12), function (o) { go('ocorrenciaDetalheAdmin', { ocorrenciaAtual: o }); });
+      renderOcorrenciasList(inner, d.registrosEntreTurnos.slice(0, 12), function (o) { go('ocorrenciaDetalheAdmin', { ocorrenciaAtual: o }); });
     }
   }
   load();
@@ -1179,6 +1641,7 @@ async function renderDashOcorrencias() {
 
 async function renderDashFotos() {
   appendHtml(app, screenHeader('Evidências Fotográficas', 'Checklist da Qualidade'));
+  dashBackButton();
   const filterWrap = filtroDashboard();
   const turnoField = filterWrap.querySelector('#fTurno');
   if (turnoField) turnoField.remove(); // fotos não filtram por turno
