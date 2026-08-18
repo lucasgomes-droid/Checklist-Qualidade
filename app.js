@@ -1,4 +1,4 @@
-/* =====================================================
+//* =====================================================
    CHECKLIST DA QUALIDADE — ICC Brazil Animal Nutrition
    FRONTEND — SPA em JS puro (sem build), mesmo padrão do sistema de
    Gestão de Armazéns. Fala com o backend Apps Script via fetch().
@@ -6,7 +6,7 @@
    ===================================================== */
 
 // >>> COLE AQUI A URL DO SEU APPS SCRIPT WEB APP <<<
-const API_URL = https://script.google.com/a/macros/iccbrazil.com.br/s/AKfycbzapb-DouX5q5GN0mqH7jV8uxu3_itDtTeZANDKZqeSbg3uauw4McuXH-a_ffKiCtRa/exec
+const API_URL = 'https://script.google.com/a/macros/iccbrazil.com.br/s/AKfycbzapb-DouX5q5GN0mqH7jV8uxu3_itDtTeZANDKZqeSbg3uauw4McuXH-a_ffKiCtRa/exec';
 
 const OCORRENCIA_STATUS_LABEL = {
   ABERTA: { label: 'Aberta', cls: 'aberta' },
