@@ -1614,10 +1614,24 @@ async function renderAtividadeForm() {
   }
   selLocal.addEventListener('change', function () { carregarAmbientes(selLocal.value, null); });
 
-  const descricao = textField(card, {
-    label: 'Descrição da atividade *', multiline: true, value: editando ? editando.ATIVIDADE : '',
-    placeholder: 'Ex: Realizar limpeza completa do banheiro, incluindo piso, vasos, pias e reposição dos materiais.'
-  });
+  // Editando um item existente: um campo de descrição só, como antes.
+  // Cadastrando novo: uma lista de itens — o admin pode adicionar quantas
+  // atividades/perguntas quiser para o mesmo local+ambiente de uma vez só
+  // (ex: "Retirada de lixo", "Limpeza das mesas", "Limpeza do chão"),
+  // sem repetir o formulário inteiro pra cada uma.
+  let descricao = null;
+  let listaAtividades = null;
+  if (editando) {
+    descricao = textField(card, {
+      label: 'Descrição da atividade *', multiline: true, value: editando.ATIVIDADE,
+      placeholder: 'Ex: Realizar limpeza completa do banheiro, incluindo piso, vasos, pias e reposição dos materiais.'
+    });
+  } else {
+    listaAtividades = listaAtividadesField(card, {
+      label: 'Atividades desta lista * (uma por linha — adicione quantas quiser)',
+      placeholder: 'Ex: Retirada de lixo e troca do saco'
+    });
+  }
 
   const periodicidade = choiceField(card, {
     label: 'Frequência *', columns: 3,
@@ -1680,33 +1694,83 @@ async function renderAtividadeForm() {
     validacao.node.querySelectorAll('.option-btn')[1].click();
   }
 
-  const btn = el('<button class="btn btn--primary btn--block" style="margin-top:6px">' + (editando ? 'Salvar alterações' : 'Cadastrar atividade') + '</button>');
+  const btn = el('<button class="btn btn--primary btn--block" style="margin-top:6px">' + (editando ? 'Salvar alterações' : 'Cadastrar atividades') + '</button>');
   card.appendChild(btn);
   btn.onclick = async function () {
     const diaSemanaInput = detalheWrap.querySelector('#selDiaSemana');
     const diaMesInput = detalheWrap.querySelector('#selDiaMes');
     const payload = {
-      local: selLocal.value, ambiente: selAmbiente.value, atividade: descricao.getValue(),
+      local: selLocal.value, ambiente: selAmbiente.value,
       periodicidade: periodicidade.getValue(), turno: selTurno.value,
       diaSemana: diaSemanaInput ? diaSemanaInput.value : '', diaMes: diaMesInput ? diaMesInput.value : '',
       fotoAntes: !!fotoAntes.getValue(), fotoDepois: !!fotoDepois.getValue(), validacao: !!validacao.getValue()
     };
-    if (!payload.local || !payload.ambiente || !payload.atividade || !payload.periodicidade) {
-      toast('Preencha local, ambiente, descrição e frequência.', true);
+    if (!payload.local || !payload.ambiente || !payload.periodicidade) {
+      toast('Preencha local, ambiente e frequência.', true);
       return;
     }
     btn.disabled = true; btn.textContent = 'Salvando…';
     try {
       if (editando) {
+        payload.atividade = descricao.getValue();
+        if (!payload.atividade) { toast('Descreva a atividade.', true); btn.disabled = false; btn.textContent = 'Salvar alterações'; return; }
         payload.idAtividade = editando.ID_ATIVIDADE;
         payload.ativo = ativoField ? ativoField.getValue() : editando.ATIVO;
         await api('updateAtividade', payload);
+        toast('Atividade salva!', false, true);
       } else {
-        await api('createAtividade', payload);
+        payload.atividades = listaAtividades.getValues();
+        if (!payload.atividades.length) { toast('Adicione ao menos uma atividade.', true); btn.disabled = false; btn.textContent = 'Cadastrar atividades'; return; }
+        const resultado = await api('createAtividadesLote', payload);
+        const total = resultado && resultado.total ? resultado.total : payload.atividades.length;
+        toast(total === 1 ? 'Atividade cadastrada!' : total + ' atividades cadastradas!', false, true);
       }
-      toast('Atividade salva!', false, true);
       go('gestaoAtividades');
-    } catch (e) { btn.disabled = false; btn.textContent = editando ? 'Salvar alterações' : 'Cadastrar atividade'; }
+    } catch (e) { btn.disabled = false; btn.textContent = editando ? 'Salvar alterações' : 'Cadastrar atividades'; }
+  };
+}
+
+// Lista dinâmica de itens de texto (uma atividade/pergunta por linha), com
+// botão para adicionar mais linhas e um "×" para remover cada uma. Usada
+// no cadastro de novas atividades, para criar várias de uma vez para o
+// mesmo local+ambiente.
+function listaAtividadesField(container, opts) {
+  opts = opts || {};
+  const wrap = el(
+    '<div class="stack" style="gap:8px">' +
+      '<label style="font-size:13px;font-weight:600;color:var(--ink-soft)">' + escapeHtml(opts.label || 'Itens') + '</label>' +
+      '<div class="stack" id="itensLista" style="gap:8px"></div>' +
+      '<button type="button" class="btn btn--outline btn--sm" style="align-self:flex-start">+ Adicionar atividade</button>' +
+    '</div>'
+  );
+  container.appendChild(wrap);
+  const itensWrap = wrap.querySelector('#itensLista');
+  const btnAdd = wrap.querySelector('button');
+
+  function addRow(valorInicial) {
+    const row = el(
+      '<div class="row" style="gap:6px">' +
+        '<input type="text" placeholder="' + escapeHtml(opts.placeholder || '') + '" style="flex:1;padding:12px 13px;border:1px solid var(--line);border-radius:var(--radius);background:#fff;color:var(--ink)">' +
+        '<button type="button" class="btn btn--outline btn--sm" title="Remover">✕</button>' +
+      '</div>'
+    );
+    const input = row.querySelector('input');
+    if (valorInicial) input.value = valorInicial;
+    row.querySelector('button').onclick = function () {
+      if (itensWrap.children.length > 1) row.remove();
+      else input.value = '';
+    };
+    itensWrap.appendChild(row);
+    return input;
+  }
+  btnAdd.onclick = function () { addRow().focus(); };
+  addRow(); // começa com 1 linha vazia
+
+  return {
+    node: wrap,
+    getValues: function () {
+      return Array.from(itensWrap.querySelectorAll('input')).map(function (i) { return i.value.trim(); }).filter(Boolean);
+    }
   };
 }
 
