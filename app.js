@@ -308,6 +308,10 @@ function render() {
     naoConformidade: renderNaoConformidade,
     abrirNaoConformidade: renderAbrirNaoConformidade,
     naoConformidadeDetalheAdmin: renderNaoConformidadeDetalheAdmin,
+    gestaoUsuarios: renderGestaoUsuarios,
+    usuarioForm: renderUsuarioForm,
+    gestaoAtividades: renderGestaoAtividades,
+    atividadeForm: renderAtividadeForm,
     dashboardHub: renderDashboardHub,
     dashChecklist: renderDashChecklist,
     dashAgenteTurno: renderDashAgenteTurno,
@@ -806,6 +810,11 @@ async function renderAdminHome() {
     menuCard('🔍', 'Não Conformidade', 'Inspecionar um local e direcionar a um agente', 'naoConformidade') +
     menuCard('📊', 'Dashboards', 'Indicadores de limpeza, validação e ocorrências', 'dashboardHub') +
     menuCard('📄', 'Relatórios', 'Exportar dados em CSV ou PDF', 'relatorios') +
+  '</div>');
+  appendHtml(app, '<div class="stack" style="margin-top:14px">' +
+    '<span class="eyebrow">Cadastros</span>' +
+    menuCard('👥', 'Usuários', 'Cadastrar, editar e desativar Agentes e Administradores', 'gestaoUsuarios') +
+    menuCard('🧾', 'Atividades de limpeza', 'Cadastrar e editar as atividades do checklist', 'gestaoAtividades') +
   '</div>');
   bindMenuCards();
 }
@@ -1342,6 +1351,362 @@ async function renderPendenciaNCDetalheAgente() {
       toast('Resolução enviada!', false, true);
       go('minhasPendenciasNC');
     } catch (e) { btn.disabled = false; btn.textContent = 'Enviar resolução'; }
+  };
+}
+
+// ------------------------- ADMIN: GESTÃO DE USUÁRIOS -------------------------
+// Cadastro, edição e desativação de usuários (Agentes de Limpeza e
+// Administradores da Qualidade) pelo próprio app. A planilha (aba
+// USUARIOS) continua podendo ser editada diretamente, como antes — isso só
+// dá ao Admin uma forma alternativa de fazer o mesmo pelo celular.
+
+async function renderGestaoUsuarios() {
+  appendHtml(app,
+    screenHeader('Cadastros', 'Gestão de usuários') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('adminHome'); };
+
+  const btnNovo = el('<button class="btn btn--primary btn--block">+ Novo usuário</button>');
+  app.appendChild(btnNovo);
+  btnNovo.onclick = function () { go('usuarioForm', { usuarioEditando: null }); };
+
+  const filterWrap = el(
+    '<div class="filters" style="margin-top:12px">' +
+      '<button type="button" class="btn btn--outline btn--sm is-active" data-f="ativos">Ativos</button>' +
+      '<button type="button" class="btn btn--outline btn--sm" data-f="todos">Todos</button>' +
+    '</div>'
+  );
+  app.appendChild(filterWrap);
+  const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(listWrap);
+
+  const usuarios = await api('getUsuariosAdmin', {}).catch(function () { return []; });
+
+  function showList(filtro) {
+    filterWrap.querySelectorAll('button').forEach(function (b) { b.classList.toggle('is-active', b.dataset.f === filtro); });
+    const rows = filtro === 'ativos' ? usuarios.filter(function (u) { return String(u.ATIVO).toUpperCase() === 'SIM'; }) : usuarios;
+    listWrap.innerHTML = '';
+    if (!rows.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">👥</span>Nenhum usuário encontrado.</div>')); return; }
+    rows.forEach(function (u) {
+      const ativo = String(u.ATIVO).toUpperCase() === 'SIM';
+      const item = el(
+        '<button type="button" class="list-item" style="width:100%">' +
+          '<span><span class="list-item__title">' + escapeHtml(u.NOME) + '</span>' +
+          '<div class="list-item__sub">' + (u.PERFIL === 'ADMIN_QUALIDADE' ? 'Administrador da Qualidade' : 'Agente de Limpeza' + (u.TURNO ? ' · ' + escapeHtml(u.TURNO) : '')) + ' · @' + escapeHtml(u.USUARIO) + '</div></span>' +
+          '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativo' : 'Inativo') + '</span>' +
+        '</button>'
+      );
+      item.onclick = function () { go('usuarioForm', { usuarioEditando: u }); };
+      listWrap.appendChild(item);
+    });
+  }
+  filterWrap.querySelectorAll('button').forEach(function (b) { b.onclick = function () { showList(b.dataset.f); }; });
+  showList('ativos');
+}
+
+async function renderUsuarioForm() {
+  const editando = S.usuarioEditando;
+  appendHtml(app,
+    screenHeader('Gestão de usuários', editando ? 'Editar usuário' : 'Novo usuário') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('gestaoUsuarios'); };
+
+  const card = el('<div class="card stack"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(card);
+  const turnos = await api('getTurnos', {}).catch(function () { return []; });
+  card.innerHTML = '';
+
+  const nome = textField(card, { label: 'Nome completo *', value: editando ? editando.NOME : '' });
+  const usuario = textField(card, { label: 'Usuário (login) *', value: editando ? editando.USUARIO : '' });
+
+  const perfil = choiceField(card, {
+    label: 'Perfil *', columns: 2,
+    options: [
+      { value: 'AGENTE_LIMPEZA', label: 'Agente de Limpeza' },
+      { value: 'ADMIN_QUALIDADE', label: 'Administrador da Qualidade' }
+    ]
+  });
+
+  // Turno (só para Agente de Limpeza) e Senha (só para Administrador da
+  // Qualidade) — mostrados/escondidos conforme o perfil escolhido.
+  const turnoWrap = el('<div class="stack" style="display:none"></div>');
+  card.appendChild(turnoWrap);
+  let turnoField = null;
+
+  const senhaWrap = el('<div class="stack" style="display:none"></div>');
+  card.appendChild(senhaWrap);
+  let senhaField = null;
+
+  function atualizarCamposPorPerfil() {
+    const p = perfil.getValue();
+    const isAgente = p === 'AGENTE_LIMPEZA';
+    const isAdmin = p === 'ADMIN_QUALIDADE';
+
+    turnoWrap.style.display = isAgente ? 'flex' : 'none';
+    turnoWrap.innerHTML = '';
+    turnoField = null;
+    if (isAgente) {
+      const wrap = el('<div class="field"><label>Turno *</label><select id="selTurnoUsuario"><option value="">Selecione…</option>' +
+        turnos.map(function (t) { return '<option value="' + escapeHtml(t.TURNO) + '">' + escapeHtml(t.TURNO) + '</option>'; }).join('') + '</select></div>');
+      turnoWrap.appendChild(wrap);
+      const select = wrap.querySelector('select');
+      if (editando && editando.TURNO) select.value = editando.TURNO;
+      turnoField = { getValue: function () { return select.value; } };
+    }
+
+    senhaWrap.style.display = isAdmin ? 'flex' : 'none';
+    senhaWrap.innerHTML = '';
+    senhaField = null;
+    if (isAdmin) {
+      senhaField = textField(senhaWrap, {
+        label: editando ? 'Nova senha (deixe em branco para manter a atual)' : 'Senha *',
+        type: 'password'
+      });
+    }
+  }
+  perfil.node.addEventListener('change', atualizarCamposPorPerfil);
+
+  let ativoField = null;
+  if (editando) {
+    ativoField = choiceField(card, {
+      label: 'Status', columns: 2,
+      options: [{ value: 'SIM', label: 'Ativo' }, { value: 'NAO', label: 'Inativo' }]
+    });
+  }
+
+  // Pré-seleciona os valores atuais na edição (o clique no perfil dispara o
+  // "change" que mostra/esconde os campos de turno/senha).
+  if (editando) {
+    perfil.node.querySelectorAll('.option-btn')[editando.PERFIL === 'ADMIN_QUALIDADE' ? 1 : 0].click();
+    ativoField.node.querySelectorAll('.option-btn')[String(editando.ATIVO).toUpperCase() === 'NAO' ? 1 : 0].click();
+  }
+
+  const btn = el('<button class="btn btn--primary btn--block" style="margin-top:6px">' + (editando ? 'Salvar alterações' : 'Cadastrar usuário') + '</button>');
+  card.appendChild(btn);
+  btn.onclick = async function () {
+    const payload = {
+      nome: nome.getValue(), usuario: usuario.getValue(), perfil: perfil.getValue(),
+      senha: senhaField ? senhaField.getValue() : '',
+      turno: turnoField ? turnoField.getValue() : ''
+    };
+    if (!payload.nome || !payload.usuario) { toast('Preencha nome e usuário.', true); return; }
+    if (!payload.perfil) { toast('Selecione o perfil.', true); return; }
+    if (payload.perfil === 'ADMIN_QUALIDADE' && !editando && !payload.senha) {
+      toast('Senha é obrigatória para o perfil Administrador da Qualidade.', true);
+      return;
+    }
+    if (payload.perfil === 'AGENTE_LIMPEZA' && !payload.turno) {
+      toast('Selecione o turno do Agente de Limpeza.', true);
+      return;
+    }
+    btn.disabled = true; btn.textContent = 'Salvando…';
+    try {
+      if (editando) {
+        payload.idUsuario = editando.ID_USUARIO;
+        payload.ativo = ativoField ? ativoField.getValue() : editando.ATIVO;
+        await api('updateUsuario', payload);
+      } else {
+        await api('createUsuario', payload);
+      }
+      toast('Usuário salvo!', false, true);
+      go('gestaoUsuarios');
+    } catch (e) { btn.disabled = false; btn.textContent = editando ? 'Salvar alterações' : 'Cadastrar usuário'; }
+  };
+}
+
+// ------------------------- ADMIN: CADASTRO DE ATIVIDADES -------------------------
+// Cadastro, edição e desativação das atividades de limpeza (o planejamento
+// que alimenta o wizard de checklist do agente) pelo próprio app. A
+// planilha (aba ATIVIDADES) continua podendo ser editada diretamente.
+
+async function renderGestaoAtividades() {
+  appendHtml(app,
+    screenHeader('Cadastros', 'Atividades de limpeza') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('adminHome'); };
+
+  const btnNovo = el('<button class="btn btn--primary btn--block">+ Nova atividade</button>');
+  app.appendChild(btnNovo);
+  btnNovo.onclick = function () { go('atividadeForm', { atividadeEditando: null }); };
+
+  const filterWrap = el(
+    '<div class="filters" style="margin-top:12px">' +
+      '<select id="fLocal"><option value="">Todos os locais</option></select>' +
+      '<button type="button" class="btn btn--outline btn--sm is-active" data-f="ativas">Ativas</button>' +
+      '<button type="button" class="btn btn--outline btn--sm" data-f="todas">Todas</button>' +
+    '</div>'
+  );
+  app.appendChild(filterWrap);
+  const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(listWrap);
+
+  const selLocal = filterWrap.querySelector('#fLocal');
+  api('getLocais', {}).then(function (locais) {
+    locais.forEach(function (l) { selLocal.appendChild(el('<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>')); });
+  }).catch(function () {});
+
+  let filtroStatus = 'ativas';
+  async function load() {
+    listWrap.innerHTML = '<p class="subtle">Carregando…</p>';
+    const rows = await api('getAtividadesAdmin', { local: selLocal.value }).catch(function () { return []; });
+    const filtradas = filtroStatus === 'ativas' ? rows.filter(function (a) { return String(a.ATIVO).toUpperCase() === 'SIM'; }) : rows;
+    listWrap.innerHTML = '';
+    if (!filtradas.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🧾</span>Nenhuma atividade encontrada.</div>')); return; }
+    filtradas.forEach(function (a) {
+      const ativo = String(a.ATIVO).toUpperCase() === 'SIM';
+      const item = el(
+        '<button type="button" class="list-item" style="width:100%">' +
+          '<span><span class="list-item__title">' + escapeHtml(a.ATIVIDADE) + '</span>' +
+          '<div class="list-item__sub">' + escapeHtml(a.LOCAL) + ' · ' + escapeHtml(a.AMBIENTE) + '</div>' +
+          '<div class="list-item__sub">' + periodicidadeLabel(a.PERIODICIDADE) + (a.TURNO ? ' · ' + escapeHtml(a.TURNO) : ' · Todos os turnos') + '</div></span>' +
+          '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativa' : 'Inativa') + '</span>' +
+        '</button>'
+      );
+      item.onclick = function () { go('atividadeForm', { atividadeEditando: a }); };
+      listWrap.appendChild(item);
+    });
+  }
+  selLocal.onchange = load;
+  filterWrap.querySelectorAll('button[data-f]').forEach(function (b) {
+    b.onclick = function () {
+      filtroStatus = b.dataset.f;
+      filterWrap.querySelectorAll('button[data-f]').forEach(function (x) { x.classList.toggle('is-active', x === b); });
+      load();
+    };
+  });
+  load();
+}
+
+async function renderAtividadeForm() {
+  const editando = S.atividadeEditando;
+  appendHtml(app,
+    screenHeader('Atividades de limpeza', editando ? 'Editar atividade' : 'Nova atividade') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('gestaoAtividades'); };
+
+  const card = el('<div class="card stack"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(card);
+
+  const locais = await api('getLocais', {}).catch(function () { return []; });
+  const turnos = await api('getTurnos', {}).catch(function () { return []; });
+  card.innerHTML = '';
+
+  const localWrap = el('<div class="field"><label>Local *</label><select id="selLocal"><option value="">Selecione…</option>' +
+    locais.map(function (l) { return '<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>'; }).join('') + '</select></div>');
+  card.appendChild(localWrap);
+  const selLocal = localWrap.querySelector('select');
+
+  const ambienteWrap = el('<div class="field"><label>Ambiente *</label><select disabled><option>Selecione o local primeiro…</option></select></div>');
+  card.appendChild(ambienteWrap);
+  let selAmbiente = ambienteWrap.querySelector('select');
+
+  async function carregarAmbientes(localValor, ambienteSelecionado) {
+    const ambientes = await api('getAmbientes', { local: localValor }).catch(function () { return []; });
+    ambienteWrap.innerHTML = '<label>Ambiente *</label><select id="selAmbiente"><option value="">Selecione…</option>' +
+      ambientes.map(function (a) {
+        return '<option value="' + escapeHtml(a.AMBIENTE) + '"' + (a.AMBIENTE === ambienteSelecionado ? ' selected' : '') + '>' + escapeHtml(a.AMBIENTE) + '</option>';
+      }).join('') + '</select>';
+    selAmbiente = ambienteWrap.querySelector('select');
+  }
+  selLocal.addEventListener('change', function () { carregarAmbientes(selLocal.value, null); });
+
+  const descricao = textField(card, {
+    label: 'Descrição da atividade *', multiline: true, value: editando ? editando.ATIVIDADE : '',
+    placeholder: 'Ex: Realizar limpeza completa do banheiro, incluindo piso, vasos, pias e reposição dos materiais.'
+  });
+
+  const periodicidade = choiceField(card, {
+    label: 'Frequência *', columns: 3,
+    options: [{ value: 'DIARIO', label: 'Diário' }, { value: 'SEMANAL', label: 'Semanal' }, { value: 'MENSAL', label: 'Mensal' }]
+  });
+
+  const detalheWrap = el('<div class="stack" style="display:none"></div>');
+  card.appendChild(detalheWrap);
+  function atualizarDetalhePeriodicidade(valorInicial) {
+    const p = periodicidade.getValue();
+    detalheWrap.innerHTML = '';
+    detalheWrap.style.display = (p === 'SEMANAL' || p === 'MENSAL') ? 'flex' : 'none';
+    if (p === 'SEMANAL') {
+      const dias = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+      const wrap = el('<div class="field"><label>Dia da semana (opcional — deixe vazio para qualquer dia)</label><select id="selDiaSemana"><option value="">Qualquer dia</option>' +
+        dias.map(function (d, i) { return '<option value="' + i + '">' + d + '</option>'; }).join('') + '</select></div>');
+      detalheWrap.appendChild(wrap);
+      if (valorInicial !== undefined && valorInicial !== '' && valorInicial !== null) wrap.querySelector('select').value = String(valorInicial);
+    } else if (p === 'MENSAL') {
+      const wrap = el('<div class="field"><label>Dia do mês (opcional — deixe vazio para qualquer dia, 1-31)</label><input type="number" id="selDiaMes" min="1" max="31"></div>');
+      detalheWrap.appendChild(wrap);
+      if (valorInicial !== undefined && valorInicial !== '' && valorInicial !== null) wrap.querySelector('input').value = valorInicial;
+    }
+  }
+  periodicidade.node.addEventListener('change', function () { atualizarDetalhePeriodicidade(); });
+
+  const turnoWrap = el('<div class="field"><label>Turno (opcional — deixe vazio para valer em todos os turnos)</label><select id="selTurno"><option value="">Todos os turnos</option>' +
+    turnos.map(function (t) { return '<option value="' + escapeHtml(t.TURNO) + '">' + escapeHtml(t.TURNO) + '</option>'; }).join('') + '</select></div>');
+  card.appendChild(turnoWrap);
+  const selTurno = turnoWrap.querySelector('select');
+
+  card.appendChild(el('<div class="divider"></div>'));
+  card.appendChild(el('<strong>Exigências ao executar</strong>'));
+  const fotoAntes = choiceField(card, { label: 'Foto antes obrigatória?', columns: 2, options: [{ value: true, label: 'Sim' }, { value: false, label: 'Não' }] });
+  const fotoDepois = choiceField(card, { label: 'Foto depois obrigatória?', columns: 2, options: [{ value: true, label: 'Sim' }, { value: false, label: 'Não' }] });
+  const validacao = choiceField(card, { label: 'Exige validação da Qualidade?', columns: 2, options: [{ value: true, label: 'Sim' }, { value: false, label: 'Não' }] });
+
+  let ativoField = null;
+  if (editando) {
+    ativoField = choiceField(card, { label: 'Status', columns: 2, options: [{ value: 'SIM', label: 'Ativa' }, { value: 'NAO', label: 'Inativa' }] });
+  }
+
+  // Pré-preenche com os dados atuais na edição; numa atividade nova, os
+  // campos de exigência de foto/validação começam em "Não" (o admin ativa
+  // o que for necessário).
+  if (editando) {
+    selLocal.value = editando.LOCAL;
+    await carregarAmbientes(editando.LOCAL, editando.AMBIENTE);
+    const idxPeriodicidade = ['DIARIO', 'SEMANAL', 'MENSAL'].indexOf(editando.PERIODICIDADE);
+    periodicidade.node.querySelectorAll('.option-btn')[idxPeriodicidade > -1 ? idxPeriodicidade : 0].click();
+    atualizarDetalhePeriodicidade(editando.PERIODICIDADE === 'SEMANAL' ? editando.DIA_SEMANA : editando.DIA_MES);
+    if (editando.TURNO) selTurno.value = editando.TURNO;
+    fotoAntes.node.querySelectorAll('.option-btn')[String(editando.FOTO_ANTES).toUpperCase() === 'SIM' ? 0 : 1].click();
+    fotoDepois.node.querySelectorAll('.option-btn')[String(editando.FOTO_DEPOIS).toUpperCase() === 'SIM' ? 0 : 1].click();
+    validacao.node.querySelectorAll('.option-btn')[String(editando.VALIDACAO).toUpperCase() === 'SIM' ? 0 : 1].click();
+    ativoField.node.querySelectorAll('.option-btn')[String(editando.ATIVO).toUpperCase() === 'NAO' ? 1 : 0].click();
+  } else {
+    fotoAntes.node.querySelectorAll('.option-btn')[1].click();
+    fotoDepois.node.querySelectorAll('.option-btn')[1].click();
+    validacao.node.querySelectorAll('.option-btn')[1].click();
+  }
+
+  const btn = el('<button class="btn btn--primary btn--block" style="margin-top:6px">' + (editando ? 'Salvar alterações' : 'Cadastrar atividade') + '</button>');
+  card.appendChild(btn);
+  btn.onclick = async function () {
+    const diaSemanaInput = detalheWrap.querySelector('#selDiaSemana');
+    const diaMesInput = detalheWrap.querySelector('#selDiaMes');
+    const payload = {
+      local: selLocal.value, ambiente: selAmbiente.value, atividade: descricao.getValue(),
+      periodicidade: periodicidade.getValue(), turno: selTurno.value,
+      diaSemana: diaSemanaInput ? diaSemanaInput.value : '', diaMes: diaMesInput ? diaMesInput.value : '',
+      fotoAntes: !!fotoAntes.getValue(), fotoDepois: !!fotoDepois.getValue(), validacao: !!validacao.getValue()
+    };
+    if (!payload.local || !payload.ambiente || !payload.atividade || !payload.periodicidade) {
+      toast('Preencha local, ambiente, descrição e frequência.', true);
+      return;
+    }
+    btn.disabled = true; btn.textContent = 'Salvando…';
+    try {
+      if (editando) {
+        payload.idAtividade = editando.ID_ATIVIDADE;
+        payload.ativo = ativoField ? ativoField.getValue() : editando.ATIVO;
+        await api('updateAtividade', payload);
+      } else {
+        await api('createAtividade', payload);
+      }
+      toast('Atividade salva!', false, true);
+      go('gestaoAtividades');
+    } catch (e) { btn.disabled = false; btn.textContent = editando ? 'Salvar alterações' : 'Cadastrar atividade'; }
   };
 }
 
