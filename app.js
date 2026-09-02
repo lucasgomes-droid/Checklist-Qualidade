@@ -1595,24 +1595,35 @@ async function renderAtividadeForm() {
   const turnos = await api('getTurnos', {}).catch(function () { return []; });
   card.innerHTML = '';
 
-  const localWrap = el('<div class="field"><label>Local *</label><select id="selLocal"><option value="">Selecione…</option>' +
-    locais.map(function (l) { return '<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>'; }).join('') + '</select></div>');
+  // Local e Ambiente são texto livre — o admin pode digitar um local ou
+  // ambiente novo na hora, sem precisar cadastrá-lo antes em outro lugar.
+  // O <datalist> só sugere os que já existem (pra ajudar e evitar
+  // duplicar por erro de digitação); o backend também normaliza a grafia
+  // se o texto bater com um já cadastrado, ignorando maiúsc./minúsc.
+  const localWrap = el(
+    '<div class="field"><label>Local *</label>' +
+    '<input type="text" id="inpLocal" list="dlLocais" autocomplete="off" placeholder="Ex: Armazém 2">' +
+    '<datalist id="dlLocais">' + locais.map(function (l) { return '<option value="' + escapeHtml(l.LOCAL) + '">'; }).join('') + '</datalist>' +
+    '</div>'
+  );
   card.appendChild(localWrap);
-  const selLocal = localWrap.querySelector('select');
+  const inpLocal = localWrap.querySelector('input');
 
-  const ambienteWrap = el('<div class="field"><label>Ambiente *</label><select disabled><option>Selecione o local primeiro…</option></select></div>');
+  const ambienteWrap = el(
+    '<div class="field"><label>Ambiente *</label>' +
+    '<input type="text" id="inpAmbiente" list="dlAmbientes" autocomplete="off" placeholder="Ex: Banheiro">' +
+    '<datalist id="dlAmbientes"></datalist>' +
+    '</div>'
+  );
   card.appendChild(ambienteWrap);
-  let selAmbiente = ambienteWrap.querySelector('select');
+  const inpAmbiente = ambienteWrap.querySelector('input');
+  const dlAmbientes = ambienteWrap.querySelector('datalist');
 
-  async function carregarAmbientes(localValor, ambienteSelecionado) {
-    const ambientes = await api('getAmbientes', { local: localValor }).catch(function () { return []; });
-    ambienteWrap.innerHTML = '<label>Ambiente *</label><select id="selAmbiente"><option value="">Selecione…</option>' +
-      ambientes.map(function (a) {
-        return '<option value="' + escapeHtml(a.AMBIENTE) + '"' + (a.AMBIENTE === ambienteSelecionado ? ' selected' : '') + '>' + escapeHtml(a.AMBIENTE) + '</option>';
-      }).join('') + '</select>';
-    selAmbiente = ambienteWrap.querySelector('select');
+  async function atualizarSugestoesAmbiente() {
+    const ambientes = await api('getAmbientes', { local: inpLocal.value.trim() }).catch(function () { return []; });
+    dlAmbientes.innerHTML = ambientes.map(function (a) { return '<option value="' + escapeHtml(a.AMBIENTE) + '">'; }).join('');
   }
-  selLocal.addEventListener('change', function () { carregarAmbientes(selLocal.value, null); });
+  inpLocal.addEventListener('change', atualizarSugestoesAmbiente);
 
   // Editando um item existente: um campo de descrição só, como antes.
   // Cadastrando novo: uma lista de itens — o admin pode adicionar quantas
@@ -1678,8 +1689,9 @@ async function renderAtividadeForm() {
   // campos de exigência de foto/validação começam em "Não" (o admin ativa
   // o que for necessário).
   if (editando) {
-    selLocal.value = editando.LOCAL;
-    await carregarAmbientes(editando.LOCAL, editando.AMBIENTE);
+    inpLocal.value = editando.LOCAL;
+    inpAmbiente.value = editando.AMBIENTE;
+    await atualizarSugestoesAmbiente();
     const idxPeriodicidade = ['DIARIO', 'SEMANAL', 'MENSAL'].indexOf(editando.PERIODICIDADE);
     periodicidade.node.querySelectorAll('.option-btn')[idxPeriodicidade > -1 ? idxPeriodicidade : 0].click();
     atualizarDetalhePeriodicidade(editando.PERIODICIDADE === 'SEMANAL' ? editando.DIA_SEMANA : editando.DIA_MES);
@@ -1700,7 +1712,7 @@ async function renderAtividadeForm() {
     const diaSemanaInput = detalheWrap.querySelector('#selDiaSemana');
     const diaMesInput = detalheWrap.querySelector('#selDiaMes');
     const payload = {
-      local: selLocal.value, ambiente: selAmbiente.value,
+      local: inpLocal.value.trim(), ambiente: inpAmbiente.value.trim(),
       periodicidade: periodicidade.getValue(), turno: selTurno.value,
       diaSemana: diaSemanaInput ? diaSemanaInput.value : '', diaMes: diaMesInput ? diaMesInput.value : '',
       fotoAntes: !!fotoAntes.getValue(), fotoDepois: !!fotoDepois.getValue(), validacao: !!validacao.getValue()
