@@ -80,9 +80,33 @@ function resetSession() {
   S.usuario = null;
   S.screen = 'loginUsuario';
   S.wizard = null;
+  clearTimeout(sessaoTimer);
   document.getElementById('topbar').hidden = true;
   document.getElementById('tabbar').hidden = true;
 }
+
+// ------------------------- SESSÃO: LOGOUT AUTOMÁTICO POR INATIVIDADE -------------------------
+// Depois de um tempo sem nenhuma interação, encerra a sessão automaticamente
+// (medida de segurança para celulares compartilhados/deixados abertos no
+// setor). Só entra em ação quando há alguém logado.
+
+let sessaoTimer = null;
+const SESSAO_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutos de inatividade
+
+function reiniciarTimerSessao() {
+  clearTimeout(sessaoTimer);
+  if (!S.usuario) return;
+  sessaoTimer = setTimeout(function () {
+    if (!S.usuario) return;
+    resetSession();
+    render();
+    toast('Sessão encerrada por inatividade. Faça login novamente.', true);
+  }, SESSAO_TIMEOUT_MS);
+}
+
+['click', 'keydown', 'touchstart'].forEach(function (ev) {
+  document.addEventListener(ev, reiniciarTimerSessao, { passive: true });
+});
 
 // ------------------------- UI HELPERS -------------------------
 
@@ -92,6 +116,7 @@ function go(screen, extra) {
   S.screen = screen;
   if (extra) Object.assign(S, extra);
   render();
+  reiniciarTimerSessao();
   window.scrollTo(0, 0);
 }
 
@@ -291,6 +316,7 @@ function render() {
   const screens = {
     loginUsuario: renderLoginUsuario,
     loginSenha: renderLoginSenha,
+    loginPin: renderLoginPin,
     agenteHome: renderAgenteHome,
     novoChecklist: renderNovoChecklist,
     meusChecklists: renderMeusChecklists,
@@ -312,6 +338,7 @@ function render() {
     usuarioForm: renderUsuarioForm,
     gestaoAtividades: renderGestaoAtividades,
     atividadeForm: renderAtividadeForm,
+    gestaoLocais: renderGestaoLocais,
     dashboardHub: renderDashboardHub,
     dashChecklist: renderDashChecklist,
     dashAgenteTurno: renderDashAgenteTurno,
@@ -395,7 +422,7 @@ async function renderLoginUsuario() {
         );
         item.onclick = function () {
           if (u.PERFIL === 'ADMIN_QUALIDADE') { go('loginSenha', { pendingUser: u }); }
-          else { S.usuario = u; go('agenteHome'); }
+          else { go('loginPin', { pendingUser: u }); }
         };
         card.appendChild(item);
       });
@@ -426,6 +453,32 @@ function renderLoginSenha() {
       const data = await api('loginAdmin', { idUsuario: u.ID_USUARIO, senha: input.value });
       S.usuario = data;
       go('adminHome');
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Entrar';
+    }
+  };
+}
+
+function renderLoginPin() {
+  const u = S.pendingUser;
+  appendHtml(app,
+    screenHeader('Login Agente de Limpeza', u.NOME, 'Digite seu PIN de 4 dígitos') +
+    '<div class="card stack">' +
+      '<div class="field"><label>PIN</label><input type="password" inputmode="numeric" pattern="[0-9]*" maxlength="4" id="inpPin" autofocus></div>' +
+      '<button class="btn btn--primary btn--block" id="btnEntrar">Entrar</button>' +
+      '<button class="btn btn--outline btn--block" id="btnVoltar">← Voltar</button>' +
+    '</div>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('loginUsuario'); };
+  const btn = document.getElementById('btnEntrar');
+  const input = document.getElementById('inpPin');
+  input.addEventListener('keydown', function (e) { if (e.key === 'Enter') btn.click(); });
+  btn.onclick = async function () {
+    btn.disabled = true; btn.textContent = 'Verificando…';
+    try {
+      const data = await api('loginAgente', { idUsuario: u.ID_USUARIO, pin: input.value });
+      S.usuario = data;
+      go('agenteHome');
     } catch (e) {
       btn.disabled = false; btn.textContent = 'Entrar';
     }
@@ -826,6 +879,7 @@ async function renderAdminHome() {
     '<span class="eyebrow">Cadastros</span>' +
     menuCard('👥', 'Usuários', 'Cadastrar, editar e desativar Agentes e Administradores', 'gestaoUsuarios') +
     menuCard('🧾', 'Atividades de limpeza', 'Cadastrar e editar as atividades do checklist', 'gestaoAtividades') +
+    menuCard('📍', 'Locais e Ambientes', 'Renomear e ativar/desativar locais e ambientes cadastrados', 'gestaoLocais') +
   '</div>');
   bindMenuCards();
 }
@@ -900,25 +954,106 @@ async function renderValidacaoChecklists() {
         '<option value="NAO_CONFORME">Não conforme</option>' +
         '<option value="CONFORME">Conforme</option>' +
       '</select>' +
+      '<select id="fLocal"><option value="">Todos os locais</option></select>' +
+      '<select id="fTurno"><option value="">Todos os turnos</option></select>' +
+      '<select id="fAgente"><option value="">Todos os agentes</option></select>' +
+      '<select id="fOrdem">' +
+        '<option value="recentes">Mais recentes primeiro</option>' +
+        '<option value="antigos">Mais antigos primeiro (FIFO)</option>' +
+      '</select>' +
     '</div>'
   );
   app.appendChild(filterWrap);
+
+  // Preenche os selects de Local/Turno/Agente com as opções cadastradas.
+  api('getLocais', {}).then(function (locais) {
+    const sel = document.getElementById('fLocal');
+    locais.forEach(function (l) { sel.appendChild(el('<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>')); });
+  }).catch(function () {});
+  api('getTurnos', {}).then(function (turnos) {
+    const sel = document.getElementById('fTurno');
+    turnos.forEach(function (t) { sel.appendChild(el('<option value="' + escapeHtml(t.TURNO) + '">' + escapeHtml(t.TURNO) + '</option>')); });
+  }).catch(function () {});
+  api('getUsuariosAdmin', {}).then(function (usuarios) {
+    const sel = document.getElementById('fAgente');
+    usuarios.filter(function (u) { return u.PERFIL === 'AGENTE_LIMPEZA'; }).forEach(function (u) {
+      sel.appendChild(el('<option value="' + escapeHtml(u.ID_USUARIO) + '">' + escapeHtml(u.NOME) + '</option>'));
+    });
+  }).catch(function () {});
+
+  const selecaoRow = el(
+    '<div class="row between" style="margin-top:10px">' +
+      '<button type="button" class="btn btn--outline btn--sm" id="btnSelecionar">Selecionar vários</button>' +
+      '<span></span>' +
+    '</div>'
+  );
+  app.appendChild(selecaoRow);
+
   const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
   app.appendChild(listWrap);
 
+  const aprovarBar = el(
+    '<div class="card row between" id="aprovarBar" style="display:none;position:sticky;bottom:70px;margin-top:12px">' +
+      '<span id="aprovarBarLabel">0 selecionados</span>' +
+      '<button type="button" class="btn btn--primary btn--sm" id="btnAprovarLote">Aprovar selecionados</button>' +
+    '</div>'
+  );
+  app.appendChild(aprovarBar);
+
+  let modoSelecao = false;
+  let selecionados = {};
+
+  function atualizarBarraAprovacao() {
+    const total = Object.keys(selecionados).filter(function (k) { return selecionados[k]; }).length;
+    aprovarBar.style.display = (modoSelecao && total > 0) ? 'flex' : 'none';
+    document.getElementById('aprovarBarLabel').textContent = total + ' selecionado' + (total === 1 ? '' : 's');
+  }
+
+  document.getElementById('btnSelecionar').onclick = function () {
+    modoSelecao = !modoSelecao;
+    selecionados = {};
+    document.getElementById('btnSelecionar').textContent = modoSelecao ? 'Cancelar seleção' : 'Selecionar vários';
+    document.getElementById('btnSelecionar').classList.toggle('is-active', modoSelecao);
+    atualizarBarraAprovacao();
+    load();
+  };
+
+  document.getElementById('btnAprovarLote').onclick = async function () {
+    const ids = Object.keys(selecionados).filter(function (k) { return selecionados[k]; });
+    if (!ids.length) return;
+    const btn = document.getElementById('btnAprovarLote');
+    btn.disabled = true; btn.textContent = 'Aprovando…';
+    try {
+      await api('aprovarChecklistsLote', { idsChecklist: ids, adminValidador: S.usuario.NOME });
+      toast(ids.length + ' checklist(s) aprovado(s)!', false, true);
+      modoSelecao = false;
+      selecionados = {};
+      document.getElementById('btnSelecionar').textContent = 'Selecionar vários';
+      document.getElementById('btnSelecionar').classList.remove('is-active');
+      atualizarBarraAprovacao();
+      load();
+    } catch (e) { btn.disabled = false; btn.textContent = 'Aprovar selecionados'; }
+  };
+
   async function load() {
     listWrap.innerHTML = '<p class="subtle">Carregando…</p>';
-    const rows = await api('getChecklists', {
+    let rows = await api('getChecklists', {
       status: document.getElementById('fStatus').value,
-      resultado: document.getElementById('fResultado').value
+      resultado: document.getElementById('fResultado').value,
+      local: document.getElementById('fLocal').value,
+      turno: document.getElementById('fTurno').value,
+      idAgente: document.getElementById('fAgente').value
     }).catch(function () { return []; });
+    if (document.getElementById('fOrdem').value === 'antigos') rows = rows.slice().reverse();
     listWrap.innerHTML = '';
     if (!rows.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🧹</span>Nenhum checklist encontrado.</div>')); return; }
     rows.forEach(function (c) {
       const st = CHECKLIST_STATUS_LABEL[c.STATUS] || { label: c.STATUS, cls: 'aberta' };
       const resultadoTag = c.RESULTADO === 'NAO_CONFORME' ? '<span style="color:var(--st-risco);font-weight:600">⚠ Não conforme</span>' : '<span style="color:var(--st-finalizada)">✓ Conforme</span>';
+      const podeSelecionar = modoSelecao && c.STATUS === 'PENDENTE_VALIDACAO';
       const item = el(
         '<button type="button" class="list-item" style="width:100%">' +
+          (podeSelecionar ? '<input type="checkbox" class="chkSelecionar" style="margin-right:10px;width:20px;height:20px" ' + (selecionados[c.ID_CHECKLIST] ? 'checked' : '') + '>' : '') +
           '<span><span class="shiplabel">' + escapeHtml(c.ID_CHECKLIST) + '</span>' +
           '<div class="list-item__title" style="margin-top:6px">' + escapeHtml(c.ATIVIDADE) + '</div>' +
           '<div class="list-item__sub">' + escapeHtml(c.LOCAL) + ' · ' + escapeHtml(c.AMBIENTE) + ' · ' + escapeHtml(c.AGENTE) + '</div>' +
@@ -926,12 +1061,30 @@ async function renderValidacaoChecklists() {
           '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
         '</button>'
       );
-      item.onclick = function () { go('checklistDetalheAdmin', { checklistAtual: c }); };
+      if (podeSelecionar) {
+        const chk = item.querySelector('.chkSelecionar');
+        // Clique exatamente na caixinha: deixa o navegador alternar
+        // sozinho e só sincroniza o estado (evita alternar duas vezes).
+        chk.onclick = function (e) {
+          e.stopPropagation();
+          selecionados[c.ID_CHECKLIST] = chk.checked;
+          atualizarBarraAprovacao();
+        };
+        // Clique no resto do item: alterna manualmente.
+        item.onclick = function () {
+          chk.checked = !chk.checked;
+          selecionados[c.ID_CHECKLIST] = chk.checked;
+          atualizarBarraAprovacao();
+        };
+      } else {
+        item.onclick = function () { go('checklistDetalheAdmin', { checklistAtual: c }); };
+      }
       listWrap.appendChild(item);
     });
   }
-  document.getElementById('fStatus').onchange = load;
-  document.getElementById('fResultado').onchange = load;
+  ['fStatus', 'fResultado', 'fLocal', 'fTurno', 'fAgente', 'fOrdem'].forEach(function (id) {
+    document.getElementById(id).onchange = load;
+  });
   load();
 }
 
@@ -1295,11 +1448,53 @@ async function renderNaoConformidadeDetalheAdmin() {
 // ------------------------- AGENTE: MINHAS PENDÊNCIAS (Não Conformidade) -------------------------
 
 async function renderMinhasPendenciasNC() {
-  appendHtml(app, screenHeader('Minhas pendências', 'Não conformidades direcionadas a você'));
-  const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  appendHtml(app, screenHeader('Minhas pendências', 'Não conformidades e checklists reprovados direcionados a você'));
+
+  const refazerWrap = el('<div class="stack" id="refazerWrap"></div>');
+  app.appendChild(refazerWrap);
+
+  appendHtml(app, '<span class="eyebrow" style="display:block;margin:14px 0 6px">Não conformidades</span>');
+  const listWrap = el('<div class="stack" id="list"><p class="subtle">Carregando…</p></div>');
   app.appendChild(listWrap);
-  const rows = await api('getNaoConformidades', { idAgenteResponsavel: S.usuario.ID_USUARIO }).catch(function () { return []; });
+
+  const [refazer, rows] = await Promise.all([
+    api('getPendenciasRefazer', { idAgente: S.usuario.ID_USUARIO }).catch(function () { return []; }),
+    api('getNaoConformidades', { idAgenteResponsavel: S.usuario.ID_USUARIO }).catch(function () { return []; })
+  ]);
+  renderRefazerListAgente(refazerWrap, refazer);
   renderNCListAgente(listWrap, rows);
+}
+
+// Checklists reprovados com pedido de refazer que ainda não foram
+// corrigidos. Ao tocar, o agente vai direto para a etapa de itens do
+// checklist daquele local/ambiente/turno/periodicidade, sem precisar
+// navegar o assistente do início.
+function renderRefazerListAgente(wrap, rows) {
+  wrap.innerHTML = '';
+  if (!rows.length) return;
+  appendHtml(wrap, '<span class="eyebrow" style="display:block;margin-bottom:6px">Checklists para refazer</span>');
+  const card = el('<div class="stack"></div>');
+  wrap.appendChild(card);
+  rows.forEach(function (c) {
+    const item = el(
+      '<button type="button" class="list-item" style="width:100%">' +
+        '<span>' +
+        '<div class="list-item__title">' + escapeHtml(c.ATIVIDADE) + '</div>' +
+        '<div class="list-item__sub">' + escapeHtml(c.LOCAL) + ' · ' + escapeHtml(c.AMBIENTE) + ' · ' + escapeHtml(c.TURNO) + '</div>' +
+        (c.MOTIVO_REPROVACAO ? '<div class="list-item__sub" style="color:var(--st-risco)">Motivo: ' + escapeHtml(c.MOTIVO_REPROVACAO) + '</div>' : '') +
+        '</span>' +
+        '<span class="tag tag--validacao">Refazer</span>' +
+      '</button>'
+    );
+    item.onclick = function () {
+      S.wizard = {
+        type: 'checklist', step: 'itens',
+        periodicidade: c.PERIODICIDADE, turno: c.TURNO, local: c.LOCAL, ambiente: c.AMBIENTE
+      };
+      go('novoChecklist');
+    };
+    card.appendChild(item);
+  });
 }
 
 function renderNCListAgente(wrap, rows) {
@@ -1401,10 +1596,13 @@ async function renderGestaoUsuarios() {
     if (!rows.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">👥</span>Nenhum usuário encontrado.</div>')); return; }
     rows.forEach(function (u) {
       const ativo = String(u.ATIVO).toUpperCase() === 'SIM';
+      const semPin = ativo && u.PERFIL === 'AGENTE_LIMPEZA' && !String(u.PIN || '').trim();
       const item = el(
         '<button type="button" class="list-item" style="width:100%">' +
           '<span><span class="list-item__title">' + escapeHtml(u.NOME) + '</span>' +
-          '<div class="list-item__sub">' + (u.PERFIL === 'ADMIN_QUALIDADE' ? 'Administrador da Qualidade' : 'Agente de Limpeza' + (u.TURNO ? ' · ' + escapeHtml(u.TURNO) : '')) + ' · @' + escapeHtml(u.USUARIO) + '</div></span>' +
+          '<div class="list-item__sub">' + (u.PERFIL === 'ADMIN_QUALIDADE' ? 'Administrador da Qualidade' : 'Agente de Limpeza' + (u.TURNO ? ' · ' + escapeHtml(u.TURNO) : '')) + ' · @' + escapeHtml(u.USUARIO) + '</div>' +
+          (semPin ? '<div class="list-item__sub" style="color:var(--st-risco)">⚠ Sem PIN cadastrado — não consegue entrar</div>' : '') +
+          '</span>' +
           '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativo' : 'Inativo') + '</span>' +
         '</button>'
       );
@@ -1445,6 +1643,7 @@ async function renderUsuarioForm() {
   const turnoWrap = el('<div class="stack" style="display:none"></div>');
   card.appendChild(turnoWrap);
   let turnoField = null;
+  let pinField = null;
 
   const senhaWrap = el('<div class="stack" style="display:none"></div>');
   card.appendChild(senhaWrap);
@@ -1465,6 +1664,16 @@ async function renderUsuarioForm() {
       const select = wrap.querySelector('select');
       if (editando && editando.TURNO) select.value = editando.TURNO;
       turnoField = { getValue: function () { return select.value; } };
+
+      pinField = textField(turnoWrap, {
+        label: editando ? 'PIN de acesso — 4 dígitos (deixe em branco para manter o atual)' : 'PIN de acesso — 4 dígitos *',
+        type: 'password'
+      });
+      if (editando && !editando.PIN) {
+        appendHtml(turnoWrap, '<p class="subtle" style="color:var(--st-risco)">⚠ Este agente ainda não tem PIN cadastrado e não consegue fazer login. Cadastre um PIN para liberar o acesso.</p>');
+      }
+    } else {
+      pinField = null;
     }
 
     senhaWrap.style.display = isAdmin ? 'flex' : 'none';
@@ -1500,7 +1709,8 @@ async function renderUsuarioForm() {
     const payload = {
       nome: nome.getValue(), usuario: usuario.getValue(), perfil: perfil.getValue(),
       senha: senhaField ? senhaField.getValue() : '',
-      turno: turnoField ? turnoField.getValue() : ''
+      turno: turnoField ? turnoField.getValue() : '',
+      pin: pinField ? pinField.getValue() : ''
     };
     if (!payload.nome || !payload.usuario) { toast('Preencha nome e usuário.', true); return; }
     if (!payload.perfil) { toast('Selecione o perfil.', true); return; }
@@ -1510,6 +1720,14 @@ async function renderUsuarioForm() {
     }
     if (payload.perfil === 'AGENTE_LIMPEZA' && !payload.turno) {
       toast('Selecione o turno do Agente de Limpeza.', true);
+      return;
+    }
+    if (payload.perfil === 'AGENTE_LIMPEZA' && !editando && !payload.pin) {
+      toast('Cadastre um PIN de 4 dígitos para o Agente de Limpeza.', true);
+      return;
+    }
+    if (payload.perfil === 'AGENTE_LIMPEZA' && payload.pin && !/^\d{4}$/.test(payload.pin)) {
+      toast('O PIN deve ter exatamente 4 dígitos numéricos.', true);
       return;
     }
     btn.disabled = true; btn.textContent = 'Salvando…';
@@ -1833,6 +2051,182 @@ function listaAtividadesField(container, opts) {
       return Array.from(itensWrap.querySelectorAll('input')).map(function (i) { return i.value.trim(); }).filter(Boolean);
     }
   };
+}
+
+// ------------------------- ADMIN: GESTÃO DE LOCAIS E AMBIENTES -------------------------
+// Complementa o cadastro livre de local/ambiente feito no formulário de
+// atividades: aqui dá para ver tudo que já foi cadastrado, corrigir a
+// grafia de um nome (renomear propaga para ambientes/atividades que usam
+// aquele local, mas nunca reescreve o histórico já registrado) e ativar/
+// desativar. Não existe aqui uma função de "mesclar" dois nomes parecidos —
+// só renomear um registro específico, para não arriscar misturar históricos
+// de lugares diferentes por engano.
+
+async function renderGestaoLocais() {
+  appendHtml(app,
+    screenHeader('Cadastros', 'Locais e ambientes') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('adminHome'); };
+
+  const novoLocalWrap = el('<div class="stack"></div>');
+  app.appendChild(novoLocalWrap);
+  const btnNovoLocal = el('<button class="btn btn--primary btn--block">+ Novo local</button>');
+  novoLocalWrap.appendChild(btnNovoLocal);
+  btnNovoLocal.onclick = function () {
+    novoLocalWrap.innerHTML = '';
+    const nomeField = textField(novoLocalWrap, { label: 'Nome do novo local *' });
+    const row = el('<div class="row" style="gap:10px"></div>');
+    novoLocalWrap.appendChild(row);
+    const btnSalvar = el('<button class="btn btn--primary" style="flex:1">Salvar</button>');
+    const btnCancelar = el('<button class="btn btn--outline" style="flex:1">Cancelar</button>');
+    row.appendChild(btnSalvar); row.appendChild(btnCancelar);
+    btnCancelar.onclick = function () { go('gestaoLocais'); };
+    btnSalvar.onclick = async function () {
+      if (!nomeField.getValue()) { toast('Informe o nome do local.', true); return; }
+      btnSalvar.disabled = true;
+      try {
+        await api('createLocal', { nome: nomeField.getValue() });
+        toast('Local cadastrado!', false, true);
+        go('gestaoLocais');
+      } catch (e) { btnSalvar.disabled = false; }
+    };
+  };
+
+  const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(listWrap);
+
+  const locais = await api('getLocaisAdmin', {}).catch(function () { return []; });
+  listWrap.innerHTML = '';
+  if (!locais.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">📍</span>Nenhum local cadastrado.</div>')); return; }
+
+  locais.forEach(function (l) {
+    const ativo = String(l.ATIVO).toUpperCase() === 'SIM';
+    const localCard = el('<div class="card stack"></div>');
+    listWrap.appendChild(localCard);
+
+    const header = el(
+      '<button type="button" class="list-item" style="width:100%">' +
+        '<span class="list-item__title">' + escapeHtml(l.LOCAL) + '</span>' +
+        '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativo' : 'Inativo') + '</span>' +
+      '</button>'
+    );
+    localCard.appendChild(header);
+
+    const acoesWrap = el('<div class="row" style="gap:10px;display:none"></div>');
+    localCard.appendChild(acoesWrap);
+    const ambientesWrap = el('<div class="stack" style="display:none;padding-left:8px"></div>');
+    localCard.appendChild(ambientesWrap);
+
+    let aberto = false;
+    header.onclick = function () {
+      aberto = !aberto;
+      acoesWrap.style.display = aberto ? 'flex' : 'none';
+      ambientesWrap.style.display = aberto ? 'flex' : 'none';
+      if (aberto && !ambientesWrap.dataset.loaded) {
+        ambientesWrap.dataset.loaded = '1';
+        carregarAmbientes();
+      }
+    };
+
+    acoesWrap.innerHTML =
+      '<button type="button" class="btn btn--outline btn--sm" data-a="renomear">Renomear</button>' +
+      '<button type="button" class="btn btn--outline btn--sm" data-a="status">' + (ativo ? 'Desativar' : 'Ativar') + '</button>';
+    acoesWrap.querySelector('[data-a="renomear"]').onclick = function () {
+      ambientesWrap.style.display = 'none';
+      acoesWrap.innerHTML = '';
+      const nomeField = textField(acoesWrap, { label: 'Novo nome *', value: l.LOCAL });
+      const row = el('<div class="row" style="gap:10px"></div>');
+      acoesWrap.appendChild(row);
+      const btnSalvar = el('<button class="btn btn--primary btn--sm" style="flex:1">Salvar</button>');
+      const btnCancelar = el('<button class="btn btn--outline btn--sm" style="flex:1">Cancelar</button>');
+      row.appendChild(btnSalvar); row.appendChild(btnCancelar);
+      btnCancelar.onclick = function () { go('gestaoLocais'); };
+      btnSalvar.onclick = async function () {
+        if (!nomeField.getValue()) { toast('Informe o nome.', true); return; }
+        btnSalvar.disabled = true;
+        try {
+          await api('renomearLocal', { idLocal: l.ID_LOCAL, novoNome: nomeField.getValue() });
+          toast('Local renomeado!', false, true);
+          go('gestaoLocais');
+        } catch (e) { btnSalvar.disabled = false; }
+      };
+    };
+    acoesWrap.querySelector('[data-a="status"]').onclick = async function () {
+      await api('atualizarStatusLocal', { idLocal: l.ID_LOCAL, ativo: ativo ? 'NAO' : 'SIM' }).catch(function () {});
+      toast(ativo ? 'Local desativado.' : 'Local ativado.', false, true);
+      go('gestaoLocais');
+    };
+
+    function carregarAmbientes() {
+      ambientesWrap.innerHTML = '<p class="subtle">Carregando ambientes…</p>';
+      api('getAmbientesAdmin', { local: l.LOCAL }).then(function (ambientes) {
+        ambientesWrap.innerHTML = '';
+        const btnNovoAmbiente = el('<button class="btn btn--outline btn--sm" style="align-self:flex-start">+ Novo ambiente</button>');
+        ambientesWrap.appendChild(btnNovoAmbiente);
+        btnNovoAmbiente.onclick = function () {
+          ambientesWrap.innerHTML = '';
+          const nomeField = textField(ambientesWrap, { label: 'Nome do novo ambiente *' });
+          const row = el('<div class="row" style="gap:10px"></div>');
+          ambientesWrap.appendChild(row);
+          const btnSalvar = el('<button class="btn btn--primary btn--sm" style="flex:1">Salvar</button>');
+          const btnCancelar = el('<button class="btn btn--outline btn--sm" style="flex:1">Cancelar</button>');
+          row.appendChild(btnSalvar); row.appendChild(btnCancelar);
+          btnCancelar.onclick = function () { go('gestaoLocais'); };
+          btnSalvar.onclick = async function () {
+            if (!nomeField.getValue()) { toast('Informe o nome do ambiente.', true); return; }
+            btnSalvar.disabled = true;
+            try {
+              await api('createAmbiente', { local: l.LOCAL, nome: nomeField.getValue() });
+              toast('Ambiente cadastrado!', false, true);
+              go('gestaoLocais');
+            } catch (e) { btnSalvar.disabled = false; }
+          };
+        };
+
+        if (!ambientes.length) {
+          ambientesWrap.appendChild(el('<p class="subtle">Nenhum ambiente cadastrado para este local.</p>'));
+          return;
+        }
+        ambientes.forEach(function (a) {
+          const ativoA = String(a.ATIVO).toUpperCase() === 'SIM';
+          const row = el(
+            '<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)">' +
+              '<span>' + escapeHtml(a.AMBIENTE) + '</span>' +
+              '<span class="tag tag--' + (ativoA ? 'finalizada' : 'aberta') + '">' + (ativoA ? 'Ativo' : 'Inativo') + '</span>' +
+            '</div>'
+          );
+          const acoesA = el('<div class="row" style="gap:8px;margin-bottom:8px"></div>');
+          const btnRenomearA = el('<button type="button" class="btn btn--outline btn--sm" style="flex:1">Renomear</button>');
+          const btnStatusA = el('<button type="button" class="btn btn--outline btn--sm" style="flex:1">' + (ativoA ? 'Desativar' : 'Ativar') + '</button>');
+          acoesA.appendChild(btnRenomearA); acoesA.appendChild(btnStatusA);
+          ambientesWrap.appendChild(row);
+          ambientesWrap.appendChild(acoesA);
+
+          btnRenomearA.onclick = function () {
+            acoesA.innerHTML = '';
+            const nomeField = textField(acoesA, { label: 'Novo nome *', value: a.AMBIENTE });
+            const btnSalvar = el('<button class="btn btn--primary btn--sm">Salvar</button>');
+            acoesA.appendChild(btnSalvar);
+            btnSalvar.onclick = async function () {
+              if (!nomeField.getValue()) { toast('Informe o nome.', true); return; }
+              btnSalvar.disabled = true;
+              try {
+                await api('renomearAmbiente', { idAmbiente: a.ID_AMBIENTE, novoNome: nomeField.getValue() });
+                toast('Ambiente renomeado!', false, true);
+                go('gestaoLocais');
+              } catch (e) { btnSalvar.disabled = false; }
+            };
+          };
+          btnStatusA.onclick = async function () {
+            await api('atualizarStatusAmbiente', { idAmbiente: a.ID_AMBIENTE, ativo: ativoA ? 'NAO' : 'SIM' }).catch(function () {});
+            toast(ativoA ? 'Ambiente desativado.' : 'Ambiente ativado.', false, true);
+            go('gestaoLocais');
+          };
+        });
+      }).catch(function () { ambientesWrap.innerHTML = ''; });
+    }
+  });
 }
 
 // ------------------------- DASHBOARD HELPERS -------------------------
@@ -2209,6 +2603,11 @@ const REPORTS = {
     titulo: 'Ocorrências', icone: '⚠️', descricao: 'Todas as ocorrências registradas',
     action: 'getOcorrencias', getRows: function (rows) { return rows; },
     colunas: [['ID_OCORRENCIA', 'ID'], ['DATA', 'Data'], ['HORA', 'Hora'], ['TURNO', 'Turno'], ['LOCAL', 'Local'], ['AMBIENTE', 'Ambiente'], ['AGENTE', 'Agente'], ['DESCRICAO', 'Descrição'], ['STATUS', 'Status']]
+  },
+  naoConformidades: {
+    titulo: 'Não conformidades', icone: '🔍', descricao: 'Inspeções da Qualidade direcionadas a agentes',
+    action: 'getNaoConformidades', getRows: function (rows) { return rows; },
+    colunas: [['ID_NC', 'ID'], ['DATA', 'Data'], ['HORA', 'Hora'], ['LOCAL', 'Local'], ['AMBIENTE', 'Ambiente'], ['DESCRICAO', 'Descrição'], ['AGENTE_RESPONSAVEL', 'Agente responsável'], ['ADMIN_ABRIU', 'Aberta por'], ['STATUS', 'Status'], ['MOTIVO_REPROVACAO', 'Motivo reprovação']]
   }
 };
 
