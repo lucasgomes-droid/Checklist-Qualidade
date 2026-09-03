@@ -371,27 +371,38 @@ async function renderLoginUsuario() {
       '<div class="login-logo"><img src="logo.png" alt="ICC Brazil" class="mark"></div>' +
       '<h1 class="title-xl" style="text-align:center">Checklist da Qualidade</h1>' +
       '<p class="subtle" style="text-align:center;margin-bottom:8px">ICC Brazil Animal Nutrition · Selecione seu usuário</p>' +
-      '<div class="card stack" id="usuariosList"><p class="subtle">Carregando usuários…</p></div>' +
+      '<div id="usuariosBlocos"><p class="subtle">Carregando usuários…</p></div>' +
     '</div>'
   );
   try {
     const usuarios = await api('getUsuarios', {});
-    const wrap = document.getElementById('usuariosList');
+    const wrap = document.getElementById('usuariosBlocos');
     wrap.innerHTML = '';
     if (!usuarios.length) { wrap.innerHTML = '<p class="subtle">Nenhum usuário ativo cadastrado.</p>'; return; }
-    usuarios.forEach(function (u) {
-      const item = el(
-        '<button type="button" class="list-item" style="width:100%">' +
-          '<span><span class="list-item__title">' + escapeHtml(u.NOME) + '</span>' +
-          '<div class="list-item__sub">' + (u.PERFIL === 'ADMIN_QUALIDADE' ? 'Administrador da Qualidade' : 'Agente de Limpeza') + '</div></span><span>›</span>' +
-        '</button>'
-      );
-      item.onclick = function () {
-        if (u.PERFIL === 'ADMIN_QUALIDADE') { go('loginSenha', { pendingUser: u }); }
-        else { S.usuario = u; go('agenteHome'); }
-      };
-      wrap.appendChild(item);
-    });
+
+    // Dois blocos separados (Agente de Limpeza / Administrador da
+    // Qualidade) em vez de uma lista única com todo mundo misturado.
+    function bloco(titulo, lista) {
+      if (!lista.length) return;
+      wrap.appendChild(el('<span class="eyebrow" style="display:block;margin:14px 0 6px">' + escapeHtml(titulo) + '</span>'));
+      const card = el('<div class="card stack"></div>');
+      wrap.appendChild(card);
+      lista.forEach(function (u) {
+        const item = el(
+          '<button type="button" class="list-item" style="width:100%">' +
+            '<span class="list-item__title">' + escapeHtml(u.NOME) + '</span><span>›</span>' +
+          '</button>'
+        );
+        item.onclick = function () {
+          if (u.PERFIL === 'ADMIN_QUALIDADE') { go('loginSenha', { pendingUser: u }); }
+          else { S.usuario = u; go('agenteHome'); }
+        };
+        card.appendChild(item);
+      });
+    }
+
+    bloco('Agente de Limpeza', usuarios.filter(function (u) { return u.PERFIL === 'AGENTE_LIMPEZA'; }));
+    bloco('Administrador da Qualidade', usuarios.filter(function (u) { return u.PERFIL === 'ADMIN_QUALIDADE'; }));
   } catch (e) { /* toast já mostrado */ }
 }
 
@@ -1740,6 +1751,44 @@ async function renderAtividadeForm() {
       go('gestaoAtividades');
     } catch (e) { btn.disabled = false; btn.textContent = editando ? 'Salvar alterações' : 'Cadastrar atividades'; }
   };
+
+  // Excluir apaga a atividade de vez (diferente do Status Inativa, que só
+  // esconde). Os checklists já registrados com ela não são afetados — só
+  // deixa de aparecer em novos checklists. Pede confirmação antes.
+  if (editando) {
+    const btnExcluir = el('<button class="btn btn--danger btn--block" style="margin-top:10px">Excluir atividade</button>');
+    card.appendChild(btnExcluir);
+    const confirmWrap = el('<div class="stack" style="display:none;margin-top:10px"></div>');
+    card.appendChild(confirmWrap);
+
+    btnExcluir.onclick = function () {
+      btnExcluir.style.display = 'none';
+      confirmWrap.style.display = 'flex';
+      confirmWrap.innerHTML =
+        '<p class="subtle" style="color:var(--st-risco)">Isso apaga a atividade definitivamente da planilha (diferente de deixar Inativa). Os checklists já registrados com ela continuam no histórico normalmente. Confirma a exclusão?</p>';
+      const row = el('<div class="row" style="gap:10px"></div>');
+      confirmWrap.appendChild(row);
+      const btnCancelar = el('<button class="btn btn--outline" style="flex:1">Cancelar</button>');
+      const btnConfirmar = el('<button class="btn btn--danger" style="flex:1">Sim, excluir</button>');
+      row.appendChild(btnCancelar); row.appendChild(btnConfirmar);
+
+      btnCancelar.onclick = function () {
+        confirmWrap.style.display = 'none';
+        confirmWrap.innerHTML = '';
+        btnExcluir.style.display = 'block';
+      };
+      btnConfirmar.onclick = async function () {
+        btnConfirmar.disabled = true; btnCancelar.disabled = true; btnConfirmar.textContent = 'Excluindo…';
+        try {
+          await api('excluirAtividade', { idAtividade: editando.ID_ATIVIDADE });
+          toast('Atividade excluída.', false, true);
+          go('gestaoAtividades');
+        } catch (e) {
+          btnConfirmar.disabled = false; btnCancelar.disabled = false; btnConfirmar.textContent = 'Sim, excluir';
+        }
+      };
+    };
+  }
 }
 
 // Lista dinâmica de itens de texto (uma atividade/pergunta por linha), com
