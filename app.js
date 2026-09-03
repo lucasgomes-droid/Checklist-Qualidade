@@ -1743,6 +1743,47 @@ async function renderUsuarioForm() {
       go('gestaoUsuarios');
     } catch (e) { btn.disabled = false; btn.textContent = editando ? 'Salvar alterações' : 'Cadastrar usuário'; }
   };
+
+  // Excluir apaga o usuário de vez (diferente do Status Inativo, que só
+  // esconde da tela de login). Os checklists/ocorrências/não conformidades
+  // já registrados por ele não são afetados — cada um guarda sua própria
+  // cópia do nome do agente/admin no momento em que foi feito, não depende
+  // da linha em USUARIOS continuar existindo. Não deixa o Admin excluir a
+  // própria conta logada, pra evitar ficar sem acesso sem querer.
+  if (editando && editando.ID_USUARIO !== S.usuario.ID_USUARIO) {
+    const btnExcluir = el('<button class="btn btn--danger btn--block" style="margin-top:10px">Excluir usuário</button>');
+    card.appendChild(btnExcluir);
+    const confirmWrap = el('<div class="stack" style="display:none;margin-top:10px"></div>');
+    card.appendChild(confirmWrap);
+
+    btnExcluir.onclick = function () {
+      btnExcluir.style.display = 'none';
+      confirmWrap.style.display = 'flex';
+      confirmWrap.innerHTML =
+        '<p class="subtle" style="color:var(--st-risco)">Isso apaga o usuário definitivamente da planilha (diferente de deixar Inativo). Os checklists/ocorrências já registrados por ele continuam no histórico normalmente, com o nome dele. Confirma a exclusão?</p>';
+      const row = el('<div class="row" style="gap:10px"></div>');
+      confirmWrap.appendChild(row);
+      const btnCancelar = el('<button class="btn btn--outline" style="flex:1">Cancelar</button>');
+      const btnConfirmar = el('<button class="btn btn--danger" style="flex:1">Sim, excluir</button>');
+      row.appendChild(btnCancelar); row.appendChild(btnConfirmar);
+
+      btnCancelar.onclick = function () {
+        confirmWrap.style.display = 'none';
+        confirmWrap.innerHTML = '';
+        btnExcluir.style.display = 'block';
+      };
+      btnConfirmar.onclick = async function () {
+        btnConfirmar.disabled = true; btnCancelar.disabled = true; btnConfirmar.textContent = 'Excluindo…';
+        try {
+          await api('excluirUsuario', { idUsuario: editando.ID_USUARIO });
+          toast('Usuário excluído.', false, true);
+          go('gestaoUsuarios');
+        } catch (e) {
+          btnConfirmar.disabled = false; btnCancelar.disabled = false; btnConfirmar.textContent = 'Sim, excluir';
+        }
+      };
+    };
+  }
 }
 
 // ------------------------- ADMIN: CADASTRO DE ATIVIDADES -------------------------
