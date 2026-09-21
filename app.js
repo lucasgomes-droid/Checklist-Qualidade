@@ -33,12 +33,30 @@ const CHECKLIST_STATUS_LABEL = {
 
 // ------------------------- API -------------------------
 
+// Cache em memória (só dura enquanto a página está aberta) para as listas de
+// referência que praticamente não mudam durante o uso normal do app
+// (locais, ambientes de um local, turnos, usuários da tela de login). São
+// consultadas de novo a cada passo do wizard de checklist/ocorrência — sem
+// cache, cada toque em "voltar"/avançar refaz uma chamada à planilha que já
+// tinha acabado de responder a mesma coisa. Qualquer ação que não seja
+// leitura (create/update/excluir) limpa o cache inteiro, então uma edição
+// feita em Cadastros aparece na hora em qualquer tela que use essas listas.
+const _refCache = new Map();
+const REF_CACHE_TTL_MS = 45000;
+const ACOES_CACHEAVEIS = ['getLocais', 'getAmbientes', 'getTurnos', 'getUsuarios'];
+
 async function api(action, payload) {
   if (API_URL.includes('COLE_A_URL')) {
     toast('Configure a API_URL em app.js (veja SETUP.md)', true);
     throw new Error('API_URL não configurada');
   }
   const isRead = action.startsWith('get');
+  const useCache = isRead && ACOES_CACHEAVEIS.includes(action);
+  const cacheKey = useCache ? action + ':' + JSON.stringify(flattenParams(payload)) : null;
+  if (useCache) {
+    const hit = _refCache.get(cacheKey);
+    if (hit && (Date.now() - hit.t) < REF_CACHE_TTL_MS) return hit.v;
+  }
   try {
     let res;
     if (isRead) {
@@ -53,6 +71,8 @@ async function api(action, payload) {
     }
     const json = await res.json();
     if (!json.ok) throw new Error(json.error || 'Erro desconhecido');
+    if (!isRead) _refCache.clear(); // qualquer gravação pode ter mudado uma lista de referência
+    if (useCache) _refCache.set(cacheKey, { v: json.data, t: Date.now() });
     return json.data;
   } catch (err) {
     toast(err.message || 'Erro de conexão com a planilha', true);
@@ -146,10 +166,49 @@ function escapeHtml(str) {
   });
 }
 
+// Fotos tiradas direto da câmera do celular costumam vir com vários MB cada
+// — como o checklist pode ter foto antes E depois por atividade, isso deixa
+// o envio (e o próprio salvamento no Drive pelo backend) bem mais lento em
+// conexões de fábrica/campo. Antes de virar base64 para envio, a imagem é
+// redesenhada num canvas em um tamanho máximo razoável para conferência
+// visual (1600px no lado maior) e recomprimida como JPEG — normalmente
+// reduz o tamanho de MB para poucas centenas de KB sem perda perceptível de
+// qualidade para o que a Qualidade precisa ver (comparar antes/depois).
+const FOTO_MAX_DIMENSAO = 1600;
+const FOTO_QUALIDADE_JPEG = 0.72;
+
+function comprimirImagem_(dataUrlOriginal) {
+  return new Promise(function (resolve) {
+    const img = new Image();
+    img.onload = function () {
+      let w = img.naturalWidth, h = img.naturalHeight;
+      if (!w || !h) { resolve(dataUrlOriginal); return; }
+      if (w > FOTO_MAX_DIMENSAO || h > FOTO_MAX_DIMENSAO) {
+        if (w > h) { h = Math.round(h * FOTO_MAX_DIMENSAO / w); w = FOTO_MAX_DIMENSAO; }
+        else { w = Math.round(w * FOTO_MAX_DIMENSAO / h); h = FOTO_MAX_DIMENSAO; }
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        const comprimida = canvas.toDataURL('image/jpeg', FOTO_QUALIDADE_JPEG);
+        // Só usa a versão comprimida se ela realmente ficou menor — em fotos
+        // já pequenas/simples o JPEG recomprimido pode não compensar.
+        resolve(comprimida.length < dataUrlOriginal.length ? comprimida : dataUrlOriginal);
+      } catch (e) {
+        resolve(dataUrlOriginal); // canvas indisponível/falhou: usa a foto original, sem travar o fluxo
+      }
+    };
+    img.onerror = function () { resolve(dataUrlOriginal); };
+    img.src = dataUrlOriginal;
+  });
+}
+
 function fileToDataUrl(file) {
   return new Promise(function (resolve, reject) {
     const reader = new FileReader();
-    reader.onload = function () { resolve(reader.result); };
+    reader.onload = function () { resolve(comprimirImagem_(reader.result)); };
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
@@ -1861,8 +1920,10 @@ async function renderAtividadeForm() {
   const card = el('<div class="card stack"><p class="subtle">Carregando…</p></div>');
   app.appendChild(card);
 
-  const locais = await api('getLocais', {}).catch(function () { return []; });
-  const turnos = await api('getTurnos', {}).catch(function () { return []; });
+  const [locais, turnos] = await Promise.all([
+    api('getLocais', {}).catch(function () { return []; }),
+    api('getTurnos', {}).catch(function () { return []; })
+  ]);
   card.innerHTML = '';
 
   // Local e Ambiente são texto livre — o admin pode digitar um local ou
@@ -2309,9 +2370,15 @@ function filtroDashboard() {
 }
 
 async function preencherFiltrosLocalAmbienteTurno(selLocal, selAmbiente, selTurno) {
-  const locais = await api('getLocais', {}).catch(function () { return []; });
+  // Locais e turnos são independentes entre si — busca os dois ao mesmo
+  // tempo em vez de um depois do outro, o que corta praticamente pela
+  // metade o tempo de espera pra preencher os filtros (essa função é usada
+  // por vários dashboards).
+  const [locais, turnos] = await Promise.all([
+    api('getLocais', {}).catch(function () { return []; }),
+    api('getTurnos', {}).catch(function () { return []; })
+  ]);
   locais.forEach(function (l) { selLocal.appendChild(el('<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>')); });
-  const turnos = await api('getTurnos', {}).catch(function () { return []; });
   turnos.forEach(function (t) { selTurno.appendChild(el('<option value="' + escapeHtml(t.TURNO) + '">' + escapeHtml(t.TURNO) + '</option>')); });
   selLocal.onchange = async function () {
     selAmbiente.innerHTML = '<option value="">Todos os ambientes</option>';

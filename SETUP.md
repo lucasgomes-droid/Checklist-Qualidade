@@ -1,6 +1,14 @@
 # Checklist da Qualidade — ICC Brazil Animal Nutrition — Guia de Configuração
 
-> **Atualização:** esta versão adiciona o módulo de **Não Conformidade**
+> **Atualização de performance:** esta versão deixa o app bem mais rápido,
+> sem mudar nenhuma funcionalidade. Veja a seção **"O que mudou nesta
+> atualização de performance"** mais abaixo para o detalhe técnico. Para
+> aplicar, siga a seção **"Atualizando de uma versão anterior"**: substitua
+> o `Code.gs` e rode `configurarPlanilha` de novo (não apaga nada), crie uma
+> nova versão da implantação, e troque `app.js`/`index.html`/`style.css` no
+> GitHub Pages.
+
+> **Atualização anterior:** esta versão adiciona o módulo de **Não Conformidade**
 > (inspeção feita pelo próprio Admin, direcionada a um agente específico),
 > identificação automática de responsável nas ocorrências, reorganização
 > do painel do dia e nova paleta de cores (cinza grafite + verde). Se você
@@ -184,3 +192,41 @@ em `ATIVIDADES`.
   se quiser um relatório específico só de itens reprovados ou só de
   evidências fotográficas, é simples adicionar mais uma entrada no objeto
   `REPORTS` em `app.js`.
+
+---
+
+## O que mudou nesta atualização de performance
+
+Nenhuma funcionalidade mudou — só a velocidade das respostas. As telas, os
+dados salvos e as regras continuam exatamente iguais.
+
+**Backend (`Code.gs`)**
+- **Cache de leitura**: as abas que quase não mudam (`USUARIOS`, `LOCAIS`,
+  `AMBIENTES`, `TURNOS`, `ATIVIDADES`) agora ficam guardadas por 60 segundos
+  num cache do próprio Google (`CacheService`). Isso é o que mais pesava:
+  ler a planilha inteira é a parte mais lenta de qualquer chamada, e o
+  wizard de checklist/ocorrência lê essas abas várias vezes seguidas em
+  poucos segundos. Uma edição feita direto na planilha ou pelo app pode
+  levar até 1 minuto pra aparecer — se precisar que apareça na hora, é só
+  recarregar a página duas vezes seguidas ou esperar o cache expirar.
+- **Gravações em lote**: cadastrar várias atividades de uma vez, enviar um
+  checklist com várias atividades, e aprovar vários checklists de uma vez
+  agora fazem 1 ida à planilha em vez de uma PARA CADA item/linha.
+- **Edições em 1 chamada**: alterar um registro (aprovar, reprovar, editar
+  cadastro) agora grava a linha inteira de uma vez, em vez de uma chamada
+  por campo alterado.
+
+**Frontend (`app.js`)**
+- **Cache de listas de referência**: locais, ambientes, turnos e usuários
+  ficam guardados por 45 segundos no próprio navegador. Qualquer gravação
+  (criar, editar, excluir) limpa esse cache na hora, então uma mudança feita
+  no app aparece imediatamente em qualquer tela.
+- **Fotos comprimidas automaticamente**: antes de enviar, cada foto tirada
+  pelo celular é redimensionada (máx. 1600px no lado maior) e recomprimida
+  como JPEG no próprio navegador, antes de virar base64. Fotos de câmera que
+  hoje chegam com vários MB passam a poucas centenas de KB — isso é o que
+  mais deve ser sentido em conexão de fábrica/campo, já que cada envio de
+  checklist pode levar duas fotos (antes/depois) por atividade.
+- **Chamadas em paralelo**: telas que buscavam, por exemplo, a lista de
+  locais e depois a de turnos (uma esperando a outra terminar) agora buscam
+  as duas ao mesmo tempo.
