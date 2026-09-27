@@ -240,3 +240,46 @@ input,select,textarea{font-family:inherit;font-size:16px}
 @media (prefers-reduced-motion: reduce){
   *{animation-duration:.001ms !important;transition-duration:.001ms !important}
 }
+
+/* =====================================================
+   PERFORMANCE / RESPOSTA IMEDIATA
+   ===================================================== */
+
+/* toque sem atraso de "duplo toque para zoom" e sem flash cinza no iOS */
+button,.list-item,.option-btn,.photo-btn,a{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.list-item:active,.option-btn:active,.tabbar button:active{background:#eef3ea}
+
+/* barra fina de progresso no topo enquanto há chamada em andamento */
+.netbar{
+  position:fixed;top:0;left:0;right:0;height:3px;z-index:120;pointer-events:none;
+  background:linear-gradient(90deg,transparent,var(--accent),transparent);
+  background-size:40% 100%;background-repeat:no-repeat;
+  opacity:0;transition:opacity .15s ease;
+}
+.netbar.is-on{opacity:1;animation:netbar 1s linear infinite}
+@keyframes netbar{from{background-position:-40% 0}to{background-position:140% 0}}
+
+/* avisos flutuantes: envio em segundo plano e "dados novos" */
+.pill{
+  position:fixed;left:50%;transform:translateX(-50%);bottom:74px;z-index:60;
+  border:none;border-radius:999px;padding:9px 16px;font-size:13px;font-weight:600;
+  background:var(--brand);color:#fff;box-shadow:var(--shadow);cursor:pointer;
+  white-space:nowrap;max-width:calc(100% - 32px);overflow:hidden;text-overflow:ellipsis;
+}
+.pill--aviso{background:#8a5a10}
+.pill--erro{background:var(--st-risco)}
+.pill--info{background:var(--accent)}
+.pill--topo{bottom:auto;top:64px}
+.envio-painel{
+  position:fixed;left:12px;right:12px;bottom:120px;z-index:70;max-width:560px;margin:0 auto;
+  max-height:60vh;overflow:auto;
+}
+
+/* esqueleto de carregamento (em vez de só "Carregando…") */
+.skeleton{
+  background:linear-gradient(90deg,#eceeed 25%,#f6f7f6 50%,#eceeed 75%);
+  background-size:200% 100%;border-radius:8px;animation:skeleton 1.2s ease infinite;
+}
+@keyframes skeleton{from{background-position:200% 0}to{background-position:-200% 0}}
+
+.btn .spinner{width:16px;height:16px;border-width:2px}

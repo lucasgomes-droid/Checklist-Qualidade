@@ -5,13 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="theme-color" content="#5e9030">
 <title>ICC Brazil · Checklist da Qualidade</title>
+<!-- Abre a conexão com o Apps Script (e o domínio para onde ele redireciona)
+     antes da primeira chamada da API: economiza o handshake TLS da 1ª tela. -->
+<link rel="preconnect" href="https://script.google.com" crossorigin>
+<link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" href="logo.png" as="image">
 <link rel="icon" type="image/png" href="logo.png">
 <link rel="stylesheet" href="style.css">
+<!-- Fonte carregada sem bloquear a primeira pintura da tela (usa a fonte do
+     sistema até a IBM Plex chegar). -->
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap"></noscript>
 </head>
 <body>
 
+<div id="netbar" class="netbar" aria-hidden="true"></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <header class="topbar" id="topbar" hidden>
@@ -28,6 +38,9 @@
 </header>
 
 <main id="app" class="app"></main>
+
+<button type="button" id="pillAtualizar" class="pill pill--info pill--topo" hidden>↻ Dados novos · Atualizar</button>
+<button type="button" id="pillEnvio" class="pill" hidden></button>
 
 <nav class="tabbar" id="tabbar" hidden></nav>
 

@@ -32,61 +32,630 @@ const CHECKLIST_STATUS_LABEL = {
 };
 
 // ------------------------- API -------------------------
+//
+// Camada de dados otimizada para o app responder como um app nativo, mesmo
+// com o Apps Script levando 1–4 s por chamada:
+//
+// 1) CADASTROS LOCAIS (usuários ativos, locais, ambientes, turnos,
+//    atividades): vêm todos juntos numa única chamada (getBootstrap), ficam
+//    salvos no aparelho (localStorage) e são respondidos NA HORA — a tela de
+//    login e todo o wizard de checklist abrem sem esperar a planilha. Em
+//    segundo plano o app confere se algo mudou e atualiza sozinho.
+// 2) DEMAIS LEITURAS (listas, painel, dashboards): ficam em memória. Se o
+//    dado tem menos de 15 s, responde na hora; se é mais antigo, mostra o
+//    que já tinha NA HORA e busca a versão nova em segundo plano — se mudou
+//    e o usuário não mexeu na tela, ela se atualiza sozinha; se mexeu,
+//    aparece o aviso "Dados novos · Atualizar".
+// 3) Chamadas iguais ao mesmo tempo viram UMA só (sem duplicar requisição).
+// 4) Guarda de corrida: se o usuário troca de tela antes da resposta chegar,
+//    a resposta velha é descartada (antes ela era desenhada na tela nova).
+// 5) ENVIOS EM SEGUNDO PLANO (checklist, ocorrência, resolução, validações):
+//    o app volta para a tela seguinte na hora e envia numa fila que
+//    sobrevive a queda de internet e a fechar o app (IndexedDB), com
+//    reenvio automático. O resultado já aparece nas listas imediatamente.
 
-// Cache em memória (só dura enquanto a página está aberta) para as listas de
-// referência que praticamente não mudam durante o uso normal do app
-// (locais, ambientes de um local, turnos, usuários da tela de login). São
-// consultadas de novo a cada passo do wizard de checklist/ocorrência — sem
-// cache, cada toque em "voltar"/avançar refaz uma chamada à planilha que já
-// tinha acabado de responder a mesma coisa. Qualquer ação que não seja
-// leitura (create/update/excluir) limpa o cache inteiro, então uma edição
-// feita em Cadastros aparece na hora em qualquer tela que use essas listas.
-const _refCache = new Map();
-const REF_CACHE_TTL_MS = 45000;
-const ACOES_CACHEAVEIS = ['getLocais', 'getAmbientes', 'getTurnos', 'getUsuarios'];
+let renderGen = 0;          // incrementa a cada render(): identifica "a tela atual"
+let lastRenderAt = 0;
+let lastInteractionAt = 0;
 
-async function api(action, payload) {
+const _cache = new Map();   // chave -> { v: dados, s: json-texto, t: timestamp, stale: bool }
+const _inflight = new Map(); // chave -> Promise (dedupe)
+const FRESH_MS = 15000;               // até aqui responde do cache sem ir ao servidor
+const STALE_MAX_MS = 30 * 60 * 1000;  // até aqui mostra o cache na hora e revalida por trás
+const READ_TIMEOUT_MS = 45000;
+
+const REF_ACTIONS = ['getUsuarios', 'getLocais', 'getAmbientes', 'getTurnos', 'getAtividades'];
+const ACOES_NAO_MUTAM = ['loginAdmin', 'loginAgente', 'gerarRelatorioPDF', 'ping'];
+const ACOES_ALTERAM_CADASTRO = [
+  'createUsuario', 'updateUsuario', 'atualizarStatusUsuario', 'excluirUsuario',
+  'createAtividade', 'createAtividadesLote', 'updateAtividade', 'atualizarStatusAtividade', 'excluirAtividade',
+  'createLocal', 'renomearLocal', 'atualizarStatusLocal', 'createAmbiente', 'renomearAmbiente', 'atualizarStatusAmbiente'
+];
+
+let _lastNetAt = 0; // última vez que falamos com o servidor (p/ "aquecer" antes do login)
+
+function cleanParams(obj) {
+  const out = {};
+  Object.keys(obj || {}).sort().forEach(function (k) {
+    const v = obj[k];
+    if (v !== undefined && v !== null && v !== '' && typeof v !== 'object') out[k] = v;
+  });
+  return out;
+}
+// Mantido por compatibilidade com trechos antigos
+function flattenParams(obj) { return cleanParams(obj); }
+
+function cacheKey(action, payload) {
+  return action + ':' + JSON.stringify(cleanParams(payload));
+}
+
+function checarApiUrl() {
   if (API_URL.includes('COLE_A_URL')) {
     toast('Configure a API_URL em app.js (veja SETUP.md)', true);
     throw new Error('API_URL não configurada');
   }
-  const isRead = action.startsWith('get');
-  const useCache = isRead && ACOES_CACHEAVEIS.includes(action);
-  const cacheKey = useCache ? action + ':' + JSON.stringify(flattenParams(payload)) : null;
-  if (useCache) {
-    const hit = _refCache.get(cacheKey);
-    if (hit && (Date.now() - hit.t) < REF_CACHE_TTL_MS) return hit.v;
+}
+
+// --- barra de progresso fina no topo (feedback imediato de "carregando") ---
+let _progressCount = 0;
+function progressStart() {
+  _progressCount++;
+  const b = document.getElementById('netbar');
+  if (b) b.classList.add('is-on');
+}
+function progressEnd() {
+  _progressCount = Math.max(0, _progressCount - 1);
+  if (_progressCount === 0) {
+    const b = document.getElementById('netbar');
+    if (b) b.classList.remove('is-on');
   }
+}
+
+class ServerError extends Error {} // servidor respondeu ok:false (não é falha de rede)
+
+// Chamada HTTP crua. Retorna { data, text } (text = JSON bruto, usado para
+// comparar se uma revalidação trouxe algo diferente).
+async function httpCall(action, payload, isRead, opts) {
+  checarApiUrl();
+  opts = opts || {};
+  if (!opts.background) progressStart();
+  let timer = null;
   try {
     let res;
     if (isRead) {
-      const qs = new URLSearchParams({ action, ...flattenParams(payload) }).toString();
-      res = await fetch(API_URL + '?' + qs);
+      const qs = new URLSearchParams(Object.assign({ action: action }, cleanParams(payload))).toString();
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      if (ctrl) timer = setTimeout(function () { ctrl.abort(); }, READ_TIMEOUT_MS);
+      res = await fetch(API_URL + '?' + qs, ctrl ? { signal: ctrl.signal } : undefined);
     } else {
       res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // evita preflight CORS
-        body: JSON.stringify({ action, payload })
+        body: JSON.stringify({ action: action, payload: payload })
       });
     }
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || 'Erro desconhecido');
-    if (!isRead) _refCache.clear(); // qualquer gravação pode ter mudado uma lista de referência
-    if (useCache) _refCache.set(cacheKey, { v: json.data, t: Date.now() });
-    return json.data;
+    const text = await res.text();
+    _lastNetAt = Date.now();
+    let json;
+    try { json = JSON.parse(text); } catch (e) { throw new Error('Resposta inválida do servidor'); }
+    if (!json.ok) throw new ServerError(json.error || 'Erro desconhecido');
+    // devolve só o trecho "data" como texto de comparação
+    return { data: json.data, text: text };
   } catch (err) {
-    toast(err.message || 'Erro de conexão com a planilha', true);
+    if (err && err.name === 'AbortError') throw new Error('A planilha demorou demais para responder. Tente de novo.');
+    if (err instanceof ServerError) throw err;
+    if (err && err.message === 'API_URL não configurada') throw err;
+    throw new Error(err && err.message && err.message !== 'Failed to fetch' ? err.message : 'Sem conexão com a planilha. Verifique a internet.');
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (!opts.background) progressEnd();
+  }
+}
+
+// Leitura com dedupe + aplicação das alterações ainda pendentes na fila
+// (assim uma revalidação não "desfaz" na tela algo que o usuário já fez).
+function fetchRead(action, payload, opts) {
+  const key = cacheKey(action, payload);
+  if (_inflight.has(key)) return _inflight.get(key);
+  const p = httpCall(action, payload, true, opts).then(function (r) {
+    const data = aplicarPatchesPendentes(r.data, cleanParams(payload));
+    const prev = _cache.get(key);
+    const entry = { v: data, s: r.text, t: Date.now(), stale: false };
+    _cache.set(key, entry);
+    return { data: data, changed: !prev || prev.s !== r.text };
+  }).finally(function () { _inflight.delete(key); });
+  _inflight.set(key, p);
+  return p;
+}
+
+const NUNCA = new Promise(function () {}); // promessa que nunca resolve (descarta resposta de tela antiga)
+
+async function api(action, payload, opts) {
+  opts = opts || {};
+  payload = payload || {};
+
+  if (REF_ACTIONS.indexOf(action) > -1 && !_semBootstrap) {
+    return refRead(action, payload, opts);
+  }
+
+  const isRead = action.indexOf('get') === 0 || action === 'ping';
+  if (isRead) {
+    const gen = renderGen;
+    const key = cacheKey(action, payload);
+    const hit = _cache.get(key);
+    const age = hit ? Date.now() - hit.t : Infinity;
+    if (hit && !hit.stale && age < FRESH_MS) return hit.v;
+    if (hit && age < STALE_MAX_MS) {
+      // Mostra o que já temos NA HORA e confere a versão nova por trás.
+      fetchRead(action, payload, { background: true }).then(function (r) {
+        if (r.changed) avisarDadosNovos(gen);
+      }).catch(function () {});
+      return hit.v;
+    }
+    try {
+      const r = await fetchRead(action, payload, opts);
+      if (!opts.noGate && gen !== renderGen) return NUNCA;
+      return r.data;
+    } catch (err) {
+      if (!opts.silent && (opts.noGate || gen === renderGen)) toast(err.message || 'Erro de conexão com a planilha', true);
+      if (!opts.noGate && gen !== renderGen) return NUNCA;
+      throw err;
+    }
+  }
+
+  // ---- gravação síncrona (cadastros, login, PDF) ----
+  try {
+    const r = await httpCall(action, payload, false, opts);
+    if (ACOES_NAO_MUTAM.indexOf(action) === -1) {
+      _cache.clear();
+      if (ACOES_ALTERAM_CADASTRO.indexOf(action) > -1) invalidarRef();
+    }
+    return r.data;
+  } catch (err) {
+    if (!opts.silent) toast(err.message || 'Erro de conexão com a planilha', true);
     throw err;
   }
 }
 
-function flattenParams(obj) {
-  const out = {};
-  Object.keys(obj || {}).forEach(function (k) {
-    if (obj[k] !== undefined && obj[k] !== null && typeof obj[k] !== 'object') out[k] = obj[k];
+// Marca tudo que está em memória como "precisa conferir" (continua sendo
+// mostrado na hora, mas é revalidado na próxima vez que for usado).
+function marcarCacheComoAntigo() {
+  _cache.forEach(function (e) { e.stale = true; });
+}
+
+// ------------------------- CADASTROS LOCAIS (bootstrap) -------------------------
+
+const REF_STORAGE_KEY = 'icc_checklist_ref_v1';
+const REF_REVALIDAR_MS = 60000;
+let REF = carregarRefSalvo();
+let _refPromise = null;
+let _refSujo = false;
+let _semBootstrap = false; // backend antigo sem getBootstrap: cai no modo antigo
+
+function carregarRefSalvo() {
+  try {
+    const raw = localStorage.getItem(REF_STORAGE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !obj.d || API_URL !== obj.u) return null;
+    obj.t = 0; // sempre revalida ao abrir o app
+    return obj;
+  } catch (e) { return null; }
+}
+
+function salvarRef() {
+  try { localStorage.setItem(REF_STORAGE_KEY, JSON.stringify({ d: REF.d, s: REF.s, u: API_URL })); } catch (e) { /* sem espaço/privado: só não persiste */ }
+}
+
+function invalidarRef() { _refSujo = true; refreshRef(renderGen).catch(function () {}); }
+
+function refreshRef(gen) {
+  if (_refPromise) return _refPromise;
+  const tinhaAntes = !!REF;
+  _refPromise = httpCall('getBootstrap', {}, true, { background: tinhaAntes && !_refSujo }).then(function (r) {
+    const mudou = !REF || REF.s !== r.text;
+    REF = { d: r.data, s: r.text, t: Date.now() };
+    _refSujo = false;
+    salvarRef();
+    if (mudou && tinhaAntes) avisarDadosNovos(gen);
+    return REF;
+  }).catch(function (err) {
+    if (err instanceof ServerError && /desconhecida/i.test(err.message)) {
+      _semBootstrap = true; // Code.gs ainda não foi atualizado
+    }
+    throw err;
+  }).finally(function () { _refPromise = null; });
+  return _refPromise;
+}
+
+async function refRead(action, payload, opts) {
+  const gen = renderGen;
+  if (!REF || _refSujo) {
+    try {
+      await refreshRef(gen);
+    } catch (err) {
+      if (_semBootstrap) return api(action, payload, opts); // modo compatível
+      if (!REF) {
+        if (!opts.silent && (opts.noGate || gen === renderGen)) toast(err.message, true);
+        throw err;
+      }
+      // sem internet mas com cadastro salvo: segue com o que tem
+    }
+    if (!opts.noGate && gen !== renderGen) return NUNCA;
+  } else if (Date.now() - REF.t > REF_REVALIDAR_MS) {
+    refreshRef(gen).catch(function () {});
+  }
+  return selecionarRef(action, payload);
+}
+
+function selecionarRef(action, p) {
+  const d = REF.d;
+  const eq = function (a, b) { return String(a == null ? '' : a) === String(b == null ? '' : b); };
+  switch (action) {
+    case 'getUsuarios': return d.usuarios.slice();
+    case 'getLocais': return d.locais.slice();
+    case 'getTurnos': return d.turnos.slice();
+    case 'getAmbientes':
+      return d.ambientes.filter(function (a) { return !p.local || eq(a.LOCAL, p.local); });
+    case 'getAtividades':
+      return d.atividades.filter(function (a) {
+        return eq(a.LOCAL, p.local) && eq(a.AMBIENTE, p.ambiente) && eq(a.PERIODICIDADE, p.periodicidade) &&
+          (!a.TURNO || eq(a.TURNO, p.turno));
+      });
+  }
+  return [];
+}
+
+// ------------------------- ATUALIZAÇÃO AUTOMÁTICA DA TELA -------------------------
+
+let _rerenderAgendado = false;
+function avisarDadosNovos(gen) {
+  if (gen !== renderGen || !S.usuario && S.screen !== 'loginUsuario') return;
+  const ativo = document.activeElement;
+  const digitando = ativo && /^(INPUT|TEXTAREA|SELECT)$/.test(ativo.tagName);
+  if (lastInteractionAt > lastRenderAt || digitando) {
+    mostrarPillAtualizar();
+    return;
+  }
+  if (_rerenderAgendado) return;
+  _rerenderAgendado = true;
+  setTimeout(function () {
+    _rerenderAgendado = false;
+    if (gen !== renderGen) return;
+    rerenderMantendoScroll();
+  }, 60);
+}
+
+function rerenderMantendoScroll() {
+  const y = window.scrollY;
+  esconderPillAtualizar();
+  render();
+  requestAnimationFrame(function () { requestAnimationFrame(function () { window.scrollTo(0, y); }); });
+}
+
+function mostrarPillAtualizar() {
+  const p = document.getElementById('pillAtualizar');
+  if (!p) return;
+  p.hidden = false;
+  p.onclick = rerenderMantendoScroll;
+}
+function esconderPillAtualizar() {
+  const p = document.getElementById('pillAtualizar');
+  if (p) p.hidden = true;
+}
+
+// ------------------------- PRÉ-CARREGAMENTO -------------------------
+
+// Acorda o Apps Script (a 1ª chamada depois de um tempo parado é a mais
+// lenta) enquanto o usuário ainda está digitando PIN/senha.
+function aquecerServidor() {
+  if (Date.now() - _lastNetAt < 60000) return;
+  _lastNetAt = Date.now();
+  httpCall('ping', {}, true, { background: true }).catch(function () {});
+}
+
+// Logo depois do login, já busca em paralelo o que as abas principais vão
+// precisar — quando o usuário tocar nelas, os dados já estão prontos.
+function preCarregarPosLogin() {
+  const u = S.usuario;
+  if (!u) return;
+  const o = { noGate: true, silent: true, background: true };
+  const pre = function (action, payload) { api(action, payload, o).catch(function () {}); };
+  if (u.PERFIL === 'ADMIN_QUALIDADE') {
+    pre('getPainelHoje', {});
+    pre('getChecklists', { status: 'PENDENTE_VALIDACAO' });
+    pre('getOcorrencias', { status: 'ABERTA' });
+    pre('getNaoConformidades', { status: 'ABERTA' });
+    pre('getUsuariosAdmin', {});
+  } else {
+    pre('getPendenciasRefazer', { idAgente: u.ID_USUARIO });
+    pre('getNaoConformidades', { idAgenteResponsavel: u.ID_USUARIO });
+    pre('getHistoricoAgente', { idAgente: u.ID_USUARIO });
+  }
+}
+
+// ------------------------- ALTERAÇÕES OTIMISTAS -------------------------
+// Enquanto um envio está na fila, a alteração que ele faz (ex.: checklist
+// aprovado) já é aplicada em todas as listas em memória, e continua sendo
+// aplicada por cima de qualquer resposta que chegar do servidor até o envio
+// ser confirmado.
+
+let _patches = []; // { itemId, campo, ids:{}, updates }
+
+function aplicarPatchNaLista(rows, patch, params, removerSeFiltroNaoBate) {
+  if (!Array.isArray(rows)) return rows;
+  let out = rows;
+  let mudou = false;
+  const novo = [];
+  rows.forEach(function (r) {
+    if (r && patch.ids[String(r[patch.campo])]) {
+      Object.assign(r, patch.updates);
+      mudou = true;
+      if (removerSeFiltroNaoBate && params.status && r.STATUS !== params.status) return;
+    }
+    novo.push(r);
   });
+  if (mudou) out = novo;
   return out;
 }
+
+function aplicarPatchesPendentes(data, params) {
+  if (!_patches.length || data == null) return data;
+  _patches.forEach(function (p) {
+    if (Array.isArray(data)) {
+      data = aplicarPatchNaLista(data, p, params || {}, true);
+    } else if (typeof data === 'object') {
+      Object.keys(data).forEach(function (k) {
+        if (Array.isArray(data[k])) data[k] = aplicarPatchNaLista(data[k], p, {}, false);
+      });
+    }
+  });
+  return data;
+}
+
+function registrarPatch(itemId, campo, ids, updates) {
+  const idMap = {};
+  ids.forEach(function (id) { idMap[String(id)] = true; });
+  const patch = { itemId: itemId, campo: campo, ids: idMap, updates: updates };
+  _patches.push(patch);
+  // aplica já no que está em memória
+  _cache.forEach(function (entry, key) {
+    const params = JSON.parse(key.slice(key.indexOf(':') + 1));
+    if (Array.isArray(entry.v)) entry.v = aplicarPatchNaLista(entry.v, patch, params, true);
+    else if (entry.v && typeof entry.v === 'object') {
+      Object.keys(entry.v).forEach(function (k) {
+        if (Array.isArray(entry.v[k])) entry.v[k] = aplicarPatchNaLista(entry.v[k], patch, {}, false);
+      });
+    }
+  });
+}
+
+function removerPatches(itemId) {
+  _patches = _patches.filter(function (p) { return p.itemId !== itemId; });
+}
+
+function agoraBR() {
+  const d = new Date();
+  const pad = function (n) { return String(n).padStart(2, '0'); };
+  return dateToBR(d) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+// Como cada tipo de envio se reflete nas listas enquanto não é confirmado.
+function patchDoEnvio(action, p) {
+  switch (action) {
+    case 'validarChecklist':
+      return { campo: 'ID_CHECKLIST', ids: [p.idChecklist], updates: {
+        STATUS: p.aprovado ? 'APROVADO' : 'REPROVADO', ADMIN_VALIDADOR: p.adminValidador || '', DATA_VALIDACAO: agoraBR(),
+        MOTIVO_REPROVACAO: p.aprovado ? '' : (p.motivo || ''), REFAZER: p.aprovado ? 'NAO' : (p.refazer ? 'SIM' : 'NAO')
+      } };
+    case 'aprovarChecklistsLote':
+      return { campo: 'ID_CHECKLIST', ids: p.idsChecklist || [], updates: {
+        STATUS: 'APROVADO', ADMIN_VALIDADOR: p.adminValidador || '', DATA_VALIDACAO: agoraBR(), MOTIVO_REPROVACAO: '', REFAZER: 'NAO'
+      } };
+    case 'validarOcorrencia':
+      return { campo: 'ID_OCORRENCIA', ids: [p.idOcorrencia], updates: {
+        STATUS: p.procedente ? 'PROCEDENTE' : 'NAO_PROCEDENTE', ADMIN_ANALISE: p.adminAnalise || '', DATA_ANALISE: agoraBR(),
+        RESULTADO_ANALISE: p.procedente ? 'PROCEDENTE' : 'NAO_PROCEDENTE', OBSERVACAO_ANALISE: p.observacao || ''
+      } };
+    case 'atualizarStatusOcorrencia':
+      return { campo: 'ID_OCORRENCIA', ids: [p.idOcorrencia], updates: { STATUS: p.status } };
+    case 'validarNaoConformidade':
+      return { campo: 'ID_NC', ids: [p.idNc], updates: {
+        STATUS: p.aprovado ? 'FINALIZADA' : 'ABERTA', ADMIN_VALIDADOR: p.adminValidador || '', DATA_VALIDACAO: agoraBR(),
+        MOTIVO_REPROVACAO: p.aprovado ? '' : (p.motivo || '')
+      } };
+    case 'resolverNaoConformidade':
+      return { campo: 'ID_NC', ids: [p.idNc], updates: {
+        STATUS: 'AGUARDANDO_VALIDACAO', DESCRICAO_RESOLUCAO: p.descricaoResolucao || '',
+        FOTO_RESOLUCAO: p.fotoResolucao || '', DATA_RESOLUCAO: agoraBR()
+      } };
+  }
+  return null;
+}
+
+// ------------------------- FILA DE ENVIO (outbox) -------------------------
+
+const OUTBOX_DB = 'icc_checklist_outbox';
+let outbox = [];
+let _outboxProcessando = false;
+let _outboxTimer = null;
+let _idb = null;
+
+function novoIdLocal() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+function abrirIdb() {
+  if (_idb) return _idb;
+  _idb = new Promise(function (resolve) {
+    try {
+      const req = indexedDB.open(OUTBOX_DB, 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore('itens', { keyPath: 'id' }); };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { resolve(null); };
+    } catch (e) { resolve(null); }
+  });
+  return _idb;
+}
+
+async function idbOp(mode, fn) {
+  const db = await abrirIdb();
+  if (!db) return null;
+  return new Promise(function (resolve) {
+    try {
+      const tx = db.transaction('itens', mode);
+      const r = fn(tx.objectStore('itens'));
+      tx.oncomplete = function () { resolve(r && r.result); };
+      tx.onerror = function () { resolve(null); };
+    } catch (e) { resolve(null); }
+  });
+}
+
+async function carregarOutboxSalvo() {
+  const itens = await idbOp('readonly', function (st) { return st.getAll(); });
+  if (!itens || !itens.length) return;
+  itens.sort(function (a, b) { return a.criadoEm - b.criadoEm; });
+  itens.forEach(function (it) {
+    if (outbox.some(function (o) { return o.id === it.id; })) return;
+    it.falhou = false; it.tentativas = 0;
+    outbox.push(it);
+    const patch = patchDoEnvio(it.action, it.payload);
+    if (patch) registrarPatch(it.id, patch.campo, patch.ids, patch.updates);
+  });
+  atualizarPillEnvio();
+  processarOutbox();
+}
+
+// Coloca um envio na fila e já devolve o controle para a tela.
+function enviarEmSegundoPlano(action, payload, rotulo, avisarAoConcluir) {
+  const id = novoIdLocal();
+  const item = {
+    id: id, action: action, payload: Object.assign({}, payload, { clientReqId: id }),
+    rotulo: rotulo, avisar: !!avisarAoConcluir, criadoEm: Date.now(), tentativas: 0, falhou: false, erro: ''
+  };
+  outbox.push(item);
+  idbOp('readwrite', function (st) { return st.put(item); });
+  const patch = patchDoEnvio(action, payload);
+  if (patch) registrarPatch(id, patch.campo, patch.ids, patch.updates);
+  marcarCacheComoAntigo();
+  atualizarPillEnvio();
+  processarOutbox();
+  return id;
+}
+
+async function processarOutbox() {
+  if (_outboxProcessando) return;
+  _outboxProcessando = true;
+  clearTimeout(_outboxTimer);
+  try {
+    while (outbox.length) {
+      const item = outbox.find(function (o) { return !o.falhou; });
+      if (!item) break;
+      try {
+        await httpCall(item.action, item.payload, false, { background: true });
+        outbox = outbox.filter(function (o) { return o.id !== item.id; });
+        idbOp('readwrite', function (st) { return st.delete(item.id); });
+        removerPatches(item.id);
+        marcarCacheComoAntigo();
+        if (item.avisar) toast(item.rotulo + ' enviado com sucesso ✓', false, true);
+        atualizarPillEnvio();
+        if (!outbox.some(function (o) { return !o.falhou; })) avisarDadosNovos(renderGen); // atualiza a tela aberta com o dado confirmado
+      } catch (err) {
+        item.tentativas++;
+        item.erro = err.message || 'Erro';
+        // Erro de validação do servidor não se resolve sozinho: depois de 3
+        // tentativas para e pede ação do usuário (reenviar ou descartar).
+        if (err instanceof ServerError && item.tentativas >= 3) {
+          item.falhou = true;
+          toast(item.rotulo + ' não foi aceito: ' + item.erro, true);
+          atualizarPillEnvio();
+          continue;
+        }
+        atualizarPillEnvio();
+        const espera = Math.min(60000, 4000 * Math.pow(2, Math.min(item.tentativas - 1, 4)));
+        _outboxTimer = setTimeout(processarOutbox, espera);
+        break;
+      }
+    }
+  } finally {
+    _outboxProcessando = false;
+  }
+}
+
+function atualizarPillEnvio() {
+  const pill = document.getElementById('pillEnvio');
+  if (!pill) return;
+  const pendentes = outbox.filter(function (o) { return !o.falhou; });
+  const falhos = outbox.filter(function (o) { return o.falhou; });
+  if (!outbox.length) { pill.hidden = true; fecharPainelEnvio(); return; }
+  pill.hidden = false;
+  if (falhos.length) {
+    pill.className = 'pill pill--erro';
+    pill.textContent = '⚠ ' + falhos.length + ' envio' + (falhos.length > 1 ? 's' : '') + ' com problema · toque';
+  } else {
+    const comErro = pendentes.some(function (o) { return o.tentativas > 0; });
+    pill.className = 'pill' + (comErro ? ' pill--aviso' : '');
+    pill.textContent = comErro
+      ? '📶 Sem conexão · ' + pendentes.length + ' aguardando envio'
+      : '⏳ Enviando ' + pendentes.length + '…';
+  }
+  pill.onclick = abrirPainelEnvio;
+}
+
+function abrirPainelEnvio() {
+  fecharPainelEnvio();
+  const painel = el('<div class="card stack envio-painel" id="painelEnvio"><div class="row between"><strong>Envios pendentes</strong><button type="button" class="btn btn--outline btn--sm" data-a="fechar">Fechar</button></div></div>');
+  outbox.forEach(function (o) {
+    const linha = el(
+      '<div class="stack" style="gap:6px;padding:8px 0;border-top:1px solid var(--line)">' +
+        '<div class="row between"><span>' + escapeHtml(o.rotulo) + '</span><span class="tag tag--' + (o.falhou ? 'aberta' : 'tratamento') + '">' + (o.falhou ? 'Falhou' : 'Na fila') + '</span></div>' +
+        (o.erro ? '<span class="subtle">' + escapeHtml(o.erro) + '</span>' : '') +
+        '<div class="row" style="gap:8px"><button type="button" class="btn btn--primary btn--sm" data-a="reenviar">Reenviar agora</button>' +
+        (o.falhou ? '<button type="button" class="btn btn--danger btn--sm" data-a="descartar">Descartar</button>' : '') + '</div>' +
+      '</div>'
+    );
+    linha.querySelector('[data-a="reenviar"]').onclick = function () {
+      o.falhou = false; o.tentativas = 0; o.erro = '';
+      atualizarPillEnvio(); fecharPainelEnvio(); processarOutbox();
+    };
+    const bDesc = linha.querySelector('[data-a="descartar"]');
+    if (bDesc) bDesc.onclick = function () {
+      outbox = outbox.filter(function (x) { return x.id !== o.id; });
+      idbOp('readwrite', function (st) { return st.delete(o.id); });
+      removerPatches(o.id);
+      _cache.clear();
+      atualizarPillEnvio(); fecharPainelEnvio();
+      toast('Envio descartado.');
+    };
+    painel.appendChild(linha);
+  });
+  painel.querySelector('[data-a="fechar"]').onclick = fecharPainelEnvio;
+  document.body.appendChild(painel);
+}
+function fecharPainelEnvio() {
+  const p = document.getElementById('painelEnvio');
+  if (p) p.remove();
+}
+
+window.addEventListener('online', function () {
+  outbox.forEach(function (o) { if (!o.falhou) o.tentativas = 0; });
+  processarOutbox();
+});
+document.addEventListener('visibilitychange', function () {
+  if (document.visibilityState === 'visible') processarOutbox();
+});
+window.addEventListener('beforeunload', function (e) {
+  if (outbox.some(function (o) { return !o.falhou; })) {
+    e.preventDefault();
+    e.returnValue = 'Ainda há envios pendentes.';
+    return e.returnValue;
+  }
+});
+
+['click', 'keydown', 'touchstart', 'wheel'].forEach(function (ev) {
+  document.addEventListener(ev, function () { lastInteractionAt = Date.now(); }, { passive: true, capture: true });
+});
 
 // ------------------------- STATE -------------------------
 
@@ -100,6 +669,7 @@ function resetSession() {
   S.usuario = null;
   S.screen = 'loginUsuario';
   S.wizard = null;
+  _cache.clear(); // dados do usuário anterior não ficam na memória para o próximo
   clearTimeout(sessaoTimer);
   document.getElementById('topbar').hidden = true;
   document.getElementById('tabbar').hidden = true;
@@ -132,12 +702,34 @@ function reiniciarTimerSessao() {
 
 const app = document.getElementById('app');
 
+// Ao voltar de uma tela de detalhe para a lista de onde veio, a lista volta
+// na mesma posição de rolagem (como num app nativo), em vez de pular pro topo.
+const TELA_PAI_DO_DETALHE = {
+  checklistDetalheAdmin: 'validacaoChecklists',
+  ocorrenciaDetalheAdmin: 'validacaoOcorrencias',
+  naoConformidadeDetalheAdmin: 'naoConformidade',
+  pendenciaNCDetalheAgente: 'minhasPendenciasNC',
+  usuarioForm: 'gestaoUsuarios',
+  atividadeForm: 'gestaoAtividades',
+  painelDia: 'adminHome'
+};
+const _scrollPorTela = {};
+
 function go(screen, extra) {
+  const saindoDe = S.screen;
+  _scrollPorTela[saindoDe] = window.scrollY;
   S.screen = screen;
   if (extra) Object.assign(S, extra);
   render();
   reiniciarTimerSessao();
-  window.scrollTo(0, 0);
+  const voltandoParaLista = TELA_PAI_DO_DETALHE[saindoDe] === screen && _scrollPorTela[screen];
+  if (voltandoParaLista) {
+    const y = _scrollPorTela[screen];
+    window.scrollTo(0, 0);
+    requestAnimationFrame(function () { requestAnimationFrame(function () { window.scrollTo(0, y); }); });
+  } else {
+    window.scrollTo(0, 0);
+  }
 }
 
 function toast(msg, isError, isSuccess) {
@@ -166,6 +758,30 @@ function escapeHtml(str) {
   });
 }
 
+// Lista longa desenhada em partes: as primeiras linhas aparecem na hora e o
+// restante sob demanda ("Mostrar mais"). Históricos com centenas/milhares de
+// registros deixavam a tela travada alguns segundos montando tudo de uma vez.
+const LISTA_PAGINA = 40;
+function renderListaProgressiva(wrap, rows, criarItem) {
+  let mostrados = 0;
+  const btnMais = el('<button type="button" class="btn btn--outline btn--block btn--sm" style="margin-top:4px"></button>');
+  function pagina() {
+    const frag = document.createDocumentFragment();
+    rows.slice(mostrados, mostrados + LISTA_PAGINA).forEach(function (r) { frag.appendChild(criarItem(r)); });
+    mostrados = Math.min(rows.length, mostrados + LISTA_PAGINA);
+    wrap.insertBefore(frag, btnMais.parentNode === wrap ? btnMais : null);
+    const restantes = rows.length - mostrados;
+    if (restantes > 0) {
+      btnMais.textContent = 'Mostrar mais (' + restantes + ' restante' + (restantes > 1 ? 's' : '') + ')';
+      if (btnMais.parentNode !== wrap) wrap.appendChild(btnMais);
+    } else if (btnMais.parentNode === wrap) {
+      wrap.removeChild(btnMais);
+    }
+  }
+  btnMais.onclick = pagina;
+  pagina();
+}
+
 // Fotos tiradas direto da câmera do celular costumam vir com vários MB cada
 // — como o checklist pode ter foto antes E depois por atividade, isso deixa
 // o envio (e o próprio salvamento no Drive pelo backend) bem mais lento em
@@ -174,27 +790,29 @@ function escapeHtml(str) {
 // visual (1600px no lado maior) e recomprimida como JPEG — normalmente
 // reduz o tamanho de MB para poucas centenas de KB sem perda perceptível de
 // qualidade para o que a Qualidade precisa ver (comparar antes/depois).
-const FOTO_MAX_DIMENSAO = 1600;
-const FOTO_QUALIDADE_JPEG = 0.72;
+const FOTO_MAX_DIMENSAO = 1280;
+const FOTO_QUALIDADE_JPEG = 0.7;
+
+function dimensoesReduzidas_(w, h) {
+  if (w > FOTO_MAX_DIMENSAO || h > FOTO_MAX_DIMENSAO) {
+    if (w > h) { h = Math.round(h * FOTO_MAX_DIMENSAO / w); w = FOTO_MAX_DIMENSAO; }
+    else { w = Math.round(w * FOTO_MAX_DIMENSAO / h); h = FOTO_MAX_DIMENSAO; }
+  }
+  return { w: w, h: h };
+}
 
 function comprimirImagem_(dataUrlOriginal) {
   return new Promise(function (resolve) {
     const img = new Image();
     img.onload = function () {
-      let w = img.naturalWidth, h = img.naturalHeight;
-      if (!w || !h) { resolve(dataUrlOriginal); return; }
-      if (w > FOTO_MAX_DIMENSAO || h > FOTO_MAX_DIMENSAO) {
-        if (w > h) { h = Math.round(h * FOTO_MAX_DIMENSAO / w); w = FOTO_MAX_DIMENSAO; }
-        else { w = Math.round(w * FOTO_MAX_DIMENSAO / h); h = FOTO_MAX_DIMENSAO; }
-      }
+      if (!img.naturalWidth || !img.naturalHeight) { resolve(dataUrlOriginal); return; }
+      const d = dimensoesReduzidas_(img.naturalWidth, img.naturalHeight);
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
+        canvas.width = d.w; canvas.height = d.h;
+        canvas.getContext('2d').drawImage(img, 0, 0, d.w, d.h);
         const comprimida = canvas.toDataURL('image/jpeg', FOTO_QUALIDADE_JPEG);
-        // Só usa a versão comprimida se ela realmente ficou menor — em fotos
-        // já pequenas/simples o JPEG recomprimido pode não compensar.
+        // Só usa a versão comprimida se ela realmente ficou menor.
         resolve(comprimida.length < dataUrlOriginal.length ? comprimida : dataUrlOriginal);
       } catch (e) {
         resolve(dataUrlOriginal); // canvas indisponível/falhou: usa a foto original, sem travar o fluxo
@@ -205,7 +823,23 @@ function comprimirImagem_(dataUrlOriginal) {
   });
 }
 
-function fileToDataUrl(file) {
+// Caminho rápido: decodifica a foto direto do arquivo (createImageBitmap,
+// fora da thread principal na maioria dos celulares) já respeitando a
+// orientação da câmera, sem antes converter a foto original de vários MB em
+// base64. Em navegadores sem suporte, cai no caminho antigo.
+async function fileToDataUrl(file) {
+  if (window.createImageBitmap && file.type !== 'image/gif') {
+    try {
+      const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const d = dimensoesReduzidas_(bmp.width, bmp.height);
+      const canvas = document.createElement('canvas');
+      canvas.width = d.w; canvas.height = d.h;
+      canvas.getContext('2d').drawImage(bmp, 0, 0, d.w, d.h);
+      if (bmp.close) bmp.close();
+      const url = canvas.toDataURL('image/jpeg', FOTO_QUALIDADE_JPEG);
+      if (url && url.indexOf('data:image/jpeg') === 0) return url;
+    } catch (e) { /* segue pelo caminho antigo */ }
+  }
   return new Promise(function (resolve, reject) {
     const reader = new FileReader();
     reader.onload = function () { resolve(comprimirImagem_(reader.result)); };
@@ -236,7 +870,9 @@ function photoField(container, opts) {
       wrap.querySelector('[data-role="input"]').onchange = async function (e) {
         const file = e.target.files[0];
         if (!file) return;
-        dataUrl = await fileToDataUrl(file);
+        const btnFoto = wrap.querySelector('[data-role="btn"]');
+        if (btnFoto) btnFoto.textContent = '⏳ Processando foto…';
+        try { dataUrl = await fileToDataUrl(file); } catch (err) { toast('Não foi possível ler a foto. Tente de novo.', true); }
         refresh();
       };
     }
@@ -366,11 +1002,18 @@ function comparativoBadge(atual, anterior, menorEhMelhor) {
 
 document.getElementById('btnLogout').onclick = function () { resetSession(); render(); };
 
+// Desenha a primeira tela na hora (com os usuários salvos no aparelho, se
+// houver) e, em paralelo, já acorda o servidor e confere os cadastros.
 render();
+refreshRef(renderGen).catch(function () {});
+carregarOutboxSalvo();
 
 // ------------------------- ROUTER -------------------------
 
 function render() {
+  renderGen++;
+  lastRenderAt = Date.now();
+  esconderPillAtualizar();
   app.innerHTML = '';
   const screens = {
     loginUsuario: renderLoginUsuario,
@@ -505,12 +1148,15 @@ function renderLoginSenha() {
   document.getElementById('btnVoltar').onclick = function () { go('loginUsuario'); };
   const btn = document.getElementById('btnEntrar');
   const input = document.getElementById('inpSenha');
+  aquecerServidor(); // acorda o Apps Script enquanto a senha é digitada
   input.addEventListener('keydown', function (e) { if (e.key === 'Enter') btn.click(); });
   btn.onclick = async function () {
-    btn.disabled = true; btn.textContent = 'Verificando…';
+    if (btn.disabled) return;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Verificando…';
     try {
       const data = await api('loginAdmin', { idUsuario: u.ID_USUARIO, senha: input.value });
       S.usuario = data;
+      preCarregarPosLogin();
       go('adminHome');
     } catch (e) {
       btn.disabled = false; btn.textContent = 'Entrar';
@@ -531,15 +1177,20 @@ function renderLoginPin() {
   document.getElementById('btnVoltar').onclick = function () { go('loginUsuario'); };
   const btn = document.getElementById('btnEntrar');
   const input = document.getElementById('inpPin');
+  aquecerServidor(); // acorda o Apps Script enquanto o PIN é digitado
   input.addEventListener('keydown', function (e) { if (e.key === 'Enter') btn.click(); });
+  // PIN completo (4 dígitos) já entra sozinho, sem precisar tocar em "Entrar".
+  input.addEventListener('input', function () { if (/^\d{4}$/.test(input.value)) btn.click(); });
   btn.onclick = async function () {
-    btn.disabled = true; btn.textContent = 'Verificando…';
+    if (btn.disabled) return;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Verificando…';
     try {
       const data = await api('loginAgente', { idUsuario: u.ID_USUARIO, pin: input.value });
       S.usuario = data;
+      preCarregarPosLogin();
       go('agenteHome');
     } catch (e) {
-      btn.disabled = false; btn.textContent = 'Entrar';
+      btn.disabled = false; btn.textContent = 'Entrar'; input.value = ''; input.focus();
     }
   };
 }
@@ -715,16 +1366,16 @@ function renderNovoChecklist() {
           if (!r.validate()) { toast('Preencha corretamente o item "' + r.atividade + '"', true); return; }
           payloadItens.push(r.build());
         }
-        btn.disabled = true; btn.textContent = 'Enviando…';
-        try {
-          await api('createChecklist', {
-            turno: w.turno, local: w.local, ambiente: w.ambiente, periodicidade: w.periodicidade,
-            idAgente: S.usuario.ID_USUARIO, agente: S.usuario.NOME, itens: payloadItens
-          });
-          toast('Checklist enviado com sucesso!', false, true);
-          S.wizard = null;
-          go('agenteHome');
-        } catch (e) { btn.disabled = false; btn.textContent = 'Enviar checklist'; }
+        // Envio em segundo plano: o agente já volta para o início na hora;
+        // a fila envia (e reenvia se a internet cair) sem travar a tela.
+        btn.disabled = true;
+        enviarEmSegundoPlano('createChecklist', {
+          turno: w.turno, local: w.local, ambiente: w.ambiente, periodicidade: w.periodicidade,
+          idAgente: S.usuario.ID_USUARIO, agente: S.usuario.NOME, itens: payloadItens
+        }, 'Checklist ' + w.local + ' · ' + w.ambiente, true);
+        toast('Checklist registrado — enviando…', false, true);
+        S.wizard = null;
+        go('agenteHome');
       };
     }).catch(function () {});
   }
@@ -747,10 +1398,10 @@ async function renderMeusChecklists() {
 function renderChecklistsList(wrap, rows) {
   wrap.innerHTML = '';
   if (!rows.length) { wrap.appendChild(el('<div class="empty"><span class="ic">🧹</span>Nenhum checklist encontrado.</div>')); return; }
-  rows.forEach(function (c) {
+  renderListaProgressiva(wrap, rows, function (c) {
     const st = CHECKLIST_STATUS_LABEL[c.STATUS] || { label: c.STATUS, cls: 'aberta' };
     const resultadoIcon = c.RESULTADO === 'NAO_CONFORME' ? '⚠ ' : '';
-    wrap.appendChild(el(
+    return (el(
       '<div class="list-item" style="width:100%;cursor:default">' +
         '<span><span class="shiplabel">' + escapeHtml(c.ID_CHECKLIST) + '</span>' +
         '<div class="list-item__title" style="margin-top:6px">' + resultadoIcon + escapeHtml(c.ATIVIDADE) + '</div>' +
@@ -817,16 +1468,14 @@ async function renderAbrirOcorrencia() {
       toast('Preencha local, ambiente e descrição.', true);
       return;
     }
-    btn.disabled = true; btn.textContent = 'Enviando…';
-    try {
-      await api('createOcorrencia', {
-        turno: (S.usuario && S.usuario.TURNO) || '', local: localSel.select.value, ambiente: ambienteSelect.value,
-        descricao: descricao.getValue(), foto: foto.getValue(),
-        idAgente: S.usuario.ID_USUARIO, agente: S.usuario.NOME
-      });
-      toast('Ocorrência registrada!', false, true);
-      go('agenteHome');
-    } catch (e) { btn.disabled = false; btn.textContent = 'Registrar ocorrência'; }
+    btn.disabled = true;
+    enviarEmSegundoPlano('createOcorrencia', {
+      turno: (S.usuario && S.usuario.TURNO) || '', local: localSel.select.value, ambiente: ambienteSelect.value,
+      descricao: descricao.getValue(), foto: foto.getValue(),
+      idAgente: S.usuario.ID_USUARIO, agente: S.usuario.NOME
+    }, 'Ocorrência ' + localSel.select.value + ' · ' + ambienteSelect.value, true);
+    toast('Ocorrência registrada — enviando…', false, true);
+    go('agenteHome');
   };
 }
 
@@ -854,7 +1503,7 @@ async function renderMinhasOcorrencias() {
 function renderOcorrenciasList(wrap, rows, onOpen) {
   wrap.innerHTML = '';
   if (!rows.length) { wrap.appendChild(el('<div class="empty"><span class="ic">📭</span>Nenhuma ocorrência encontrada.</div>')); return; }
-  rows.forEach(function (o) {
+  renderListaProgressiva(wrap, rows, function (o) {
     const st = OCORRENCIA_STATUS_LABEL[o.STATUS] || { label: o.STATUS, cls: 'aberta' };
     const responsavelHtml = o.AGENTE_RESPONSAVEL
       ? '<div class="list-item__sub" style="color:var(--st-risco);font-weight:600;margin-top:2px">Responsável: ' + escapeHtml(o.AGENTE_RESPONSAVEL) + (o.TURNO_RESPONSAVEL ? ' · ' + escapeHtml(o.TURNO_RESPONSAVEL) : '') + '</div>'
@@ -872,7 +1521,7 @@ function renderOcorrenciasList(wrap, rows, onOpen) {
     );
     if (onOpen) item.onclick = function () { onOpen(o); };
     else item.style.cursor = 'default';
-    wrap.appendChild(item);
+    return item;
   });
 }
 
@@ -906,9 +1555,31 @@ async function renderHistoricoAgente() {
 // ------------------------- ADMIN: HOME (painel do dia) -------------------------
 
 async function renderAdminHome() {
+  // O menu aparece NA HORA; só o card do resumo do dia espera a planilha
+  // (antes a tela inteira ficava em "Carregando" até o painel responder).
   appendHtml(app, screenHeader('Painel da Qualidade', 'Olá, ' + S.usuario.NOME));
-  const body = el('<div class="stack" id="body" style="margin-top:4px"><p class="subtle">Carregando resumo do dia…</p></div>');
+  const body = el(
+    '<div class="stack" id="body" style="margin-top:4px">' +
+      '<div class="card stack skeleton-card"><div class="skeleton" style="width:45%;height:18px"></div>' +
+      '<div class="kpi-grid"><div class="skeleton" style="height:58px"></div><div class="skeleton" style="height:58px"></div><div class="skeleton" style="height:58px"></div></div></div>' +
+    '</div>'
+  );
   app.appendChild(body);
+
+  appendHtml(app, '<div class="stack" style="margin-top:14px">' +
+    menuCard('✅', 'Validar checklists', 'Aprovar ou reprovar limpezas enviadas', 'validacaoChecklists') +
+    menuCard('⚠️', 'Validar ocorrências', 'Analisar não conformidades relatadas pelos agentes', 'validacaoOcorrencias') +
+    menuCard('🔍', 'Não Conformidade', 'Inspecionar um local e direcionar a um agente', 'naoConformidade') +
+    menuCard('📊', 'Dashboards', 'Indicadores de limpeza, validação e ocorrências', 'dashboardHub') +
+    menuCard('📄', 'Relatórios', 'Exportar dados em CSV ou PDF', 'relatorios') +
+  '</div>');
+  appendHtml(app, '<div class="stack" style="margin-top:14px">' +
+    '<span class="eyebrow">Cadastros</span>' +
+    menuCard('👥', 'Usuários', 'Cadastrar, editar e desativar Agentes e Administradores', 'gestaoUsuarios') +
+    menuCard('🧾', 'Atividades de limpeza', 'Cadastrar e editar as atividades do checklist', 'gestaoAtividades') +
+    menuCard('📍', 'Locais e Ambientes', 'Renomear e ativar/desativar locais e ambientes cadastrados', 'gestaoLocais') +
+  '</div>');
+  bindMenuCards();
 
   const painel = await api('getPainelHoje', {}).catch(function () { return null; });
   body.innerHTML = '';
@@ -926,21 +1597,6 @@ async function renderAdminHome() {
     card.onclick = function () { go('painelDia'); };
     body.appendChild(card);
   }
-
-  appendHtml(app, '<div class="stack" style="margin-top:14px">' +
-    menuCard('✅', 'Validar checklists', 'Aprovar ou reprovar limpezas enviadas', 'validacaoChecklists') +
-    menuCard('⚠️', 'Validar ocorrências', 'Analisar não conformidades relatadas pelos agentes', 'validacaoOcorrencias') +
-    menuCard('🔍', 'Não Conformidade', 'Inspecionar um local e direcionar a um agente', 'naoConformidade') +
-    menuCard('📊', 'Dashboards', 'Indicadores de limpeza, validação e ocorrências', 'dashboardHub') +
-    menuCard('📄', 'Relatórios', 'Exportar dados em CSV ou PDF', 'relatorios') +
-  '</div>');
-  appendHtml(app, '<div class="stack" style="margin-top:14px">' +
-    '<span class="eyebrow">Cadastros</span>' +
-    menuCard('👥', 'Usuários', 'Cadastrar, editar e desativar Agentes e Administradores', 'gestaoUsuarios') +
-    menuCard('🧾', 'Atividades de limpeza', 'Cadastrar e editar as atividades do checklist', 'gestaoAtividades') +
-    menuCard('📍', 'Locais e Ambientes', 'Renomear e ativar/desativar locais e ambientes cadastrados', 'gestaoLocais') +
-  '</div>');
-  bindMenuCards();
 }
 
 // ------------------------- ADMIN: PAINEL DO DIA (detalhe) -------------------------
@@ -1081,17 +1737,16 @@ async function renderValidacaoChecklists() {
     const ids = Object.keys(selecionados).filter(function (k) { return selecionados[k]; });
     if (!ids.length) return;
     const btn = document.getElementById('btnAprovarLote');
-    btn.disabled = true; btn.textContent = 'Aprovando…';
-    try {
-      await api('aprovarChecklistsLote', { idsChecklist: ids, adminValidador: S.usuario.NOME });
-      toast(ids.length + ' checklist(s) aprovado(s)!', false, true);
-      modoSelecao = false;
-      selecionados = {};
-      document.getElementById('btnSelecionar').textContent = 'Selecionar vários';
-      document.getElementById('btnSelecionar').classList.remove('is-active');
-      atualizarBarraAprovacao();
-      load();
-    } catch (e) { btn.disabled = false; btn.textContent = 'Aprovar selecionados'; }
+    enviarEmSegundoPlano('aprovarChecklistsLote', { idsChecklist: ids, adminValidador: S.usuario.NOME },
+      'Aprovação de ' + ids.length + ' checklist(s)');
+    toast(ids.length + ' checklist(s) aprovado(s)!', false, true);
+    modoSelecao = false;
+    selecionados = {};
+    btn.disabled = false;
+    document.getElementById('btnSelecionar').textContent = 'Selecionar vários';
+    document.getElementById('btnSelecionar').classList.remove('is-active');
+    atualizarBarraAprovacao();
+    load();
   };
 
   async function load() {
@@ -1106,7 +1761,7 @@ async function renderValidacaoChecklists() {
     if (document.getElementById('fOrdem').value === 'antigos') rows = rows.slice().reverse();
     listWrap.innerHTML = '';
     if (!rows.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🧹</span>Nenhum checklist encontrado.</div>')); return; }
-    rows.forEach(function (c) {
+    renderListaProgressiva(listWrap, rows, function (c) {
       const st = CHECKLIST_STATUS_LABEL[c.STATUS] || { label: c.STATUS, cls: 'aberta' };
       const resultadoTag = c.RESULTADO === 'NAO_CONFORME' ? '<span style="color:var(--st-risco);font-weight:600">⚠ Não conforme</span>' : '<span style="color:var(--st-finalizada)">✓ Conforme</span>';
       const podeSelecionar = modoSelecao && c.STATUS === 'PENDENTE_VALIDACAO';
@@ -1138,7 +1793,7 @@ async function renderValidacaoChecklists() {
       } else {
         item.onclick = function () { go('checklistDetalheAdmin', { checklistAtual: c }); };
       }
-      listWrap.appendChild(item);
+      return item;
     });
   }
   ['fStatus', 'fResultado', 'fLocal', 'fTurno', 'fAgente', 'fOrdem'].forEach(function (id) {
@@ -1191,9 +1846,10 @@ async function renderChecklistDetalheAdmin() {
   const motivoWrap = el('<div class="stack" style="display:none;margin-top:10px"></div>');
   actWrap.appendChild(motivoWrap);
 
-  btnAprovar.onclick = async function () {
+  btnAprovar.onclick = function () {
     btnAprovar.disabled = true;
-    await api('validarChecklist', { idChecklist: c.ID_CHECKLIST, aprovado: true, adminValidador: S.usuario.NOME });
+    enviarEmSegundoPlano('validarChecklist', { idChecklist: c.ID_CHECKLIST, aprovado: true, adminValidador: S.usuario.NOME },
+      'Aprovação ' + c.ID_CHECKLIST);
     toast('Checklist aprovado.', false, true);
     go('validacaoChecklists');
   };
@@ -1207,11 +1863,11 @@ async function renderChecklistDetalheAdmin() {
     motivoWrap.appendChild(btnConfirmar);
     btnConfirmar.onclick = async function () {
       if (!motivo.getValue()) { toast('Descreva o motivo da reprovação.', true); return; }
-      btnConfirmar.disabled = true; btnConfirmar.textContent = 'Enviando…';
-      await api('validarChecklist', {
+      btnConfirmar.disabled = true;
+      enviarEmSegundoPlano('validarChecklist', {
         idChecklist: c.ID_CHECKLIST, aprovado: false, adminValidador: S.usuario.NOME,
         motivo: motivo.getValue(), refazer: !!refazer.getValue()
-      });
+      }, 'Reprovação ' + c.ID_CHECKLIST);
       toast('Checklist reprovado.', false, true);
       go('validacaoChecklists');
     };
@@ -1286,8 +1942,8 @@ async function renderOcorrenciaDetalheAdmin() {
     actWrap.appendChild(row);
     ['TRATADA', 'ENCERRADA'].forEach(function (statusOpt) {
       const b = el('<button class="btn btn--outline" style="flex:1">' + OCORRENCIA_STATUS_LABEL[statusOpt].label + '</button>');
-      b.onclick = async function () {
-        await api('atualizarStatusOcorrencia', { idOcorrencia: o.ID_OCORRENCIA, status: statusOpt });
+      b.onclick = function () {
+        enviarEmSegundoPlano('atualizarStatusOcorrencia', { idOcorrencia: o.ID_OCORRENCIA, status: statusOpt }, 'Status ' + o.ID_OCORRENCIA);
         toast('Status atualizado.', false, true);
         go('validacaoOcorrencias');
       };
@@ -1306,8 +1962,9 @@ async function renderOcorrenciaDetalheAdmin() {
   row.appendChild(btnProcedente); row.appendChild(btnNaoProcedente);
 
   function submit(procedente) {
-    return async function () {
-      await api('validarOcorrencia', { idOcorrencia: o.ID_OCORRENCIA, procedente: procedente, adminAnalise: S.usuario.NOME, observacao: obs.getValue() });
+    return function () {
+      enviarEmSegundoPlano('validarOcorrencia', { idOcorrencia: o.ID_OCORRENCIA, procedente: procedente, adminAnalise: S.usuario.NOME, observacao: obs.getValue() },
+        'Análise ' + o.ID_OCORRENCIA);
       toast('Ocorrência analisada.', false, true);
       go('validacaoOcorrencias');
     };
@@ -1346,7 +2003,7 @@ async function renderNaoConformidade() {
     const rows = await api('getNaoConformidades', { status: document.getElementById('fStatus').value }).catch(function () { return []; });
     listWrap.innerHTML = '';
     if (!rows.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🔍</span>Nenhuma não conformidade encontrada.</div>')); return; }
-    rows.forEach(function (n) {
+    renderListaProgressiva(listWrap, rows, function (n) {
       const st = NC_STATUS_LABEL[n.STATUS] || { label: n.STATUS, cls: 'aberta' };
       const item = el(
         '<button type="button" class="list-item" style="width:100%">' +
@@ -1360,7 +2017,7 @@ async function renderNaoConformidade() {
         '</button>'
       );
       item.onclick = function () { go('naoConformidadeDetalheAdmin', { ncAtual: n }); };
-      listWrap.appendChild(item);
+      return item;
     });
   }
   document.getElementById('fStatus').onchange = load;
@@ -1427,16 +2084,14 @@ async function renderAbrirNaoConformidade() {
       return;
     }
     const agenteObj = agentes.find(function (a) { return a.ID_USUARIO === responsavelSelect.value; });
-    btn.disabled = true; btn.textContent = 'Enviando…';
-    try {
-      await api('createNaoConformidade', {
-        local: localSel.select.value, ambiente: ambienteSelect.value, descricao: descricao.getValue(), foto: foto.getValue(),
-        idAgenteResponsavel: responsavelSelect.value, agenteResponsavel: agenteObj ? agenteObj.NOME : '',
-        adminAbriu: S.usuario.NOME
-      });
-      toast('Não conformidade direcionada!', false, true);
-      go('naoConformidade');
-    } catch (e) { btn.disabled = false; btn.textContent = 'Direcionar ao agente'; }
+    btn.disabled = true;
+    enviarEmSegundoPlano('createNaoConformidade', {
+      local: localSel.select.value, ambiente: ambienteSelect.value, descricao: descricao.getValue(), foto: foto.getValue(),
+      idAgenteResponsavel: responsavelSelect.value, agenteResponsavel: agenteObj ? agenteObj.NOME : '',
+      adminAbriu: S.usuario.NOME
+    }, 'Não conformidade ' + localSel.select.value + ' · ' + ambienteSelect.value, true);
+    toast('Não conformidade direcionada — enviando…', false, true);
+    go('naoConformidade');
   };
 }
 
@@ -1484,8 +2139,8 @@ async function renderNaoConformidadeDetalheAdmin() {
   const motivoWrap = el('<div class="stack" style="display:none;margin-top:10px"></div>');
   actWrap.appendChild(motivoWrap);
 
-  btnAprovar.onclick = async function () {
-    await api('validarNaoConformidade', { idNc: n.ID_NC, aprovado: true, adminValidador: S.usuario.NOME });
+  btnAprovar.onclick = function () {
+    enviarEmSegundoPlano('validarNaoConformidade', { idNc: n.ID_NC, aprovado: true, adminValidador: S.usuario.NOME }, 'Validação ' + n.ID_NC);
     toast('Não conformidade finalizada.', false, true);
     go('naoConformidade');
   };
@@ -1497,7 +2152,7 @@ async function renderNaoConformidadeDetalheAdmin() {
     motivoWrap.appendChild(btnConfirmar);
     btnConfirmar.onclick = async function () {
       if (!motivo.getValue()) { toast('Descreva o que falta corrigir.', true); return; }
-      await api('validarNaoConformidade', { idNc: n.ID_NC, aprovado: false, adminValidador: S.usuario.NOME, motivo: motivo.getValue() });
+      enviarEmSegundoPlano('validarNaoConformidade', { idNc: n.ID_NC, aprovado: false, adminValidador: S.usuario.NOME, motivo: motivo.getValue() }, 'Devolução ' + n.ID_NC);
       toast('Devolvido ao agente.', false, true);
       go('naoConformidade');
     };
@@ -1559,20 +2214,20 @@ function renderRefazerListAgente(wrap, rows) {
 function renderNCListAgente(wrap, rows) {
   wrap.innerHTML = '';
   if (!rows.length) { wrap.appendChild(el('<div class="empty"><span class="ic">✅</span>Nenhuma pendência direcionada a você.</div>')); return; }
-  rows.forEach(function (n) {
+  renderListaProgressiva(wrap, rows, function (n) {
     const st = NC_STATUS_LABEL[n.STATUS] || { label: n.STATUS, cls: 'aberta' };
     const item = el(
       '<button type="button" class="list-item" style="width:100%">' +
         '<span>' +
         '<div class="list-item__title">' + escapeHtml(n.LOCAL) + ' — ' + escapeHtml(n.AMBIENTE) + '</div>' +
-        '<div class="list-item__sub" style="margin-top:3px">' + escapeHtml(n.DESCRICAO).slice(0, 60) + (n.DESCRICAO.length > 60 ? '…' : '') + '</div>' +
+        '<div class="list-item__sub" style="margin-top:3px">' + escapeHtml(String(n.DESCRICAO || '').slice(0, 60)) + (String(n.DESCRICAO || '').length > 60 ? '…' : '') + '</div>' +
         '<div class="list-item__sub">' + escapeHtml(n.DATA) + ' ' + escapeHtml(n.HORA) + '</div>' +
         '</span>' +
         '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
       '</button>'
     );
     item.onclick = function () { go('pendenciaNCDetalheAgente', { ncAtual: n }); };
-    wrap.appendChild(item);
+    return item;
   });
 }
 
@@ -1610,12 +2265,11 @@ async function renderPendenciaNCDetalheAgente() {
   actWrap.appendChild(btn);
   btn.onclick = async function () {
     if (!descricao.getValue() || !foto.getValue()) { toast('Descreva o que foi feito e envie uma foto.', true); return; }
-    btn.disabled = true; btn.textContent = 'Enviando…';
-    try {
-      await api('resolverNaoConformidade', { idNc: n.ID_NC, descricaoResolucao: descricao.getValue(), fotoResolucao: foto.getValue() });
-      toast('Resolução enviada!', false, true);
-      go('minhasPendenciasNC');
-    } catch (e) { btn.disabled = false; btn.textContent = 'Enviar resolução'; }
+    btn.disabled = true;
+    enviarEmSegundoPlano('resolverNaoConformidade', { idNc: n.ID_NC, descricaoResolucao: descricao.getValue(), fotoResolucao: foto.getValue() },
+      'Resolução ' + n.ID_NC, true);
+    toast('Resolução registrada — enviando…', false, true);
+    go('minhasPendenciasNC');
   };
 }
 
@@ -2806,11 +3460,22 @@ function buildPreviewTable(colunas, linhas) {
   const table = document.createElement('table');
   table.className = 'report-table';
   const thead = document.createElement('tr');
-  colunas.forEach(function (c) { thead.appendChild(el('<th>' + escapeHtml(c[1]) + '</th>')); });
+  // <th>/<td> precisam ser criados direto (dentro de um <div> temporário o
+  // navegador descarta essas tags e a tabela quebrava com erro).
+  colunas.forEach(function (c) {
+    const th = document.createElement('th');
+    th.textContent = c[1] == null ? '' : String(c[1]);
+    thead.appendChild(th);
+  });
   table.appendChild(thead);
   linhas.forEach(function (linha) {
     const tr = document.createElement('tr');
-    colunas.forEach(function (c) { tr.appendChild(el('<td>' + escapeHtml(linha[c[0]]) + '</td>')); });
+    colunas.forEach(function (c) {
+      const td = document.createElement('td');
+      const v = linha[c[0]];
+      td.textContent = v == null ? '' : String(v);
+      tr.appendChild(td);
+    });
     table.appendChild(tr);
   });
   return table;
