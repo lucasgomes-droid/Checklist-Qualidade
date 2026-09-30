@@ -307,3 +307,18 @@ button,.list-item,.option-btn,.photo-btn,a{touch-action:manipulation;-webkit-tap
   .painel-ativ{flex-direction:column;align-items:flex-start;gap:6px}
   .painel-ativ__turnos{justify-content:flex-start;max-width:none}
 }
+
+/* Resumo do dia por turno (card "Hoje" e painel do dia) */
+.turno-resumo{display:flex;flex-direction:column}
+.turno-linha{display:grid;grid-template-columns:96px 1fr;gap:10px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.turno-linha:first-child{border-top:none}
+.turno-linha--total{border-top:1.5px solid var(--ink-soft)}
+.turno-linha__nome{font-weight:600;font-size:14px}
+.turno-linha__nums{font-size:13px;color:var(--ink-soft)}
+.turno-linha__nums b{color:var(--ink);font-weight:700;font-family:var(--mono)}
+.turno-linha__pend{color:var(--st-aberta);font-weight:600}
+
+/* Cadastro de atividade: como contar quando vários turnos fazem */
+.modo-turno{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;padding:12px 14px}
+.modo-turno small{font-weight:400;font-size:12.5px;color:var(--ink-soft)}
+.modo-turno.is-selected small{color:var(--accent-dark)}

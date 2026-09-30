@@ -300,7 +300,7 @@ function selecionarRef(action, p) {
     case 'getAtividades':
       return d.atividades.filter(function (a) {
         return eq(a.LOCAL, p.local) && eq(a.AMBIENTE, p.ambiente) && eq(grupoPeriodicidade(a.PERIODICIDADE), grupoPeriodicidade(p.periodicidade)) &&
-          (!a.TURNO || eq(a.TURNO, p.turno));
+          atividadeValeNoTurno(a, p.turno);
       });
   }
   return [];
@@ -1405,6 +1405,27 @@ function listaDiasFixos(valor) {
   return String(valor == null ? '' : valor).split(/[\s,;]+/).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
 }
 
+// ---------- Turnos da atividade ----------
+// TURNO vazio = todos os turnos; ou um/vários separados por ";".
+// MODO_TURNO = CADA (cada turno faz) ou UM (basta um turno no dia).
+function listaTurnosAtividade(a) {
+  return String(a.TURNO == null ? '' : a.TURNO).split(';').map(function (t) { return t.trim(); }).filter(Boolean);
+}
+function atividadeValeNoTurno(a, turno) {
+  const lista = listaTurnosAtividade(a);
+  return !turno || !lista.length || lista.indexOf(turno) > -1;
+}
+function turnoCurto(t) { return String(t || '').replace(/\s*turno\s*/i, '').trim() || t; }
+function turnosLabel(a, totalTurnos) {
+  const lista = listaTurnosAtividade(a);
+  const varios = !lista.length || lista.length > 1;
+  const base = !lista.length ? 'Todos os turnos'
+    : lista.length === 1 ? lista[0]
+    : lista.map(turnoCurto).join(', ').replace(/, ([^,]*)$/, ' e $1') + ' turno';
+  if (!varios) return base;
+  return base + (String(a.MODO_TURNO || '').toUpperCase() === 'UM' ? ' · basta um' : ' · cada turno');
+}
+
 // Descrição completa da frequência de uma atividade (ex.: "3x por semana
 // (Seg, Qua, Sex)", "2x por mês · dias livres", "Semanal (Sex)").
 function frequenciaLabel(a) {
@@ -1628,17 +1649,35 @@ async function renderAdminHome() {
   if (painel) {
     const card = el('<button type="button" class="card stack" style="width:100%;text-align:left;cursor:pointer"></button>');
     card.appendChild(el('<div class="row between"><h3 class="title-lg">Hoje · ' + escapeHtml(painel.data) + '</h3><span>›</span></div>'));
-    card.appendChild(el(
-      '<div class="kpi-grid">' +
-        kpi(painel.total, 'Previstas') +
-        kpi(painel.realizados, 'Realizadas') +
-        kpi(painel.pendentes, 'Pendentes') +
-      '</div>'
-    ));
+    card.appendChild(el(resumoPorTurnoHtml(painel)));
     card.appendChild(el('<span class="subtle">Toque para ver o detalhe do que ainda falta hoje</span>'));
     card.onclick = function () { go('painelDia'); };
     body.appendChild(card);
   }
+}
+
+// Resumo do dia por turno: uma linha por turno com previstas/realizadas/
+// pendentes e barra de progresso, mais a linha "Qualquer turno" (atividades
+// em que basta um turno fazer) e o total. Backend antigo (sem porTurno):
+// cai no resumo simples.
+function resumoPorTurnoHtml(painel) {
+  const linhas = painel.porTurno || [];
+  if (!linhas.length) {
+    return '<div class="kpi-grid">' + kpi(painel.total, 'Previstas') + kpi(painel.realizados, 'Realizadas') + kpi(painel.pendentes, 'Pendentes') + '</div>';
+  }
+  const linha = function (nome, r, total) {
+    const pct = r.total ? Math.round(r.realizados / r.total * 100) : 0;
+    return '<div class="turno-linha' + (total ? ' turno-linha--total' : '') + '">' +
+      '<span class="turno-linha__nome">' + escapeHtml(nome) + '</span>' +
+      '<span style="min-width:0"><span class="turno-linha__nums"><b>' + r.realizados + '</b> de <b>' + r.total + '</b> realizadas' +
+      (r.pendentes ? ' · <span class="turno-linha__pend">' + r.pendentes + ' pendente' + (r.pendentes > 1 ? 's' : '') + '</span>' : ' · ✓') + '</span>' +
+      (total ? '' : '<div class="bar-track" style="height:6px;margin-top:5px"><div class="bar-fill" style="width:' + pct + '%"></div></div>') +
+      '</span></div>';
+  };
+  return '<div class="turno-resumo">' +
+    linhas.map(function (r) { return linha(r.turno || 'Qualquer turno', r, false); }).join('') +
+    linha('Total', { total: painel.total, realizados: painel.realizados, pendentes: painel.pendentes }, true) +
+    '</div>';
 }
 
 // ------------------------- ADMIN: PAINEL DO DIA (detalhe) -------------------------
@@ -1658,14 +1697,16 @@ async function renderPainelDia() {
   if (!painel) return;
 
   body.appendChild(el(
-    '<div class="kpi-grid">' +
-      kpi(painel.total, 'Previstas hoje') +
-      kpi(painel.realizados, 'Realizadas') +
-      kpi(painel.pendentes, 'Pendentes') +
-      kpi(painel.data, 'Data') +
+    '<div class="card stack" style="gap:6px">' +
+      '<div class="row between"><h3 class="title-lg">Dia ' + escapeHtml(painel.data) + '</h3>' +
+      (painel.viradaDia ? '<span class="subtle">Dia vira às ' + escapeHtml(painel.viradaDia) + '</span>' : '') + '</div>' +
+      resumoPorTurnoHtml(painel) +
     '</div>'
   ));
 
+  // Filtro por turno (Todos + um botão por turno que aparece no resumo).
+  const turnosDoDia = (painel.porTurno || []).map(function (r) { return r.turno; }).filter(Boolean);
+  let turnoFiltro = '';
   const filterWrap = el(
     '<div class="filters">' +
       '<button class="btn btn--outline btn--sm is-active" data-f="pendentes">Só pendentes</button>' +
@@ -1673,6 +1714,20 @@ async function renderPainelDia() {
     '</div>'
   );
   body.appendChild(filterWrap);
+  if (turnosDoDia.length > 1) {
+    const turnoWrap = el('<div class="filters"></div>');
+    ['' ].concat(turnosDoDia).forEach(function (t) {
+      const b = el('<button type="button" class="btn btn--outline btn--sm' + (t === '' ? ' is-active' : '') + '">' + escapeHtml(t || 'Todos os turnos') + '</button>');
+      b.onclick = function () {
+        turnoFiltro = t;
+        turnoWrap.querySelectorAll('button').forEach(function (x) { x.classList.toggle('is-active', x === b); });
+        showList(filtroAtual);
+      };
+      turnoWrap.appendChild(b);
+    });
+    body.appendChild(turnoWrap);
+  }
+  let filtroAtual = 'pendentes';
   const listWrap = el('<div class="stack"></div>');
   body.appendChild(listWrap);
 
@@ -1681,11 +1736,17 @@ async function renderPainelDia() {
   // Locais com pendência começam abertos; os já concluídos, fechados.
   const abertos = {};
   function showList(filtro) {
+    filtroAtual = filtro;
     filterWrap.querySelectorAll('button').forEach(function (b) { b.classList.toggle('is-active', b.dataset.f === filtro); });
     listWrap.innerHTML = '';
 
+    // Com um turno escolhido: só o que é daquele turno (as "basta um
+    // turno" entram se o turno escolhido é um dos permitidos).
+    const itensFiltrados = !turnoFiltro ? painel.itens : painel.itens.filter(function (i) {
+      return i.turno ? i.turno === turnoFiltro : (i.turnosPermitidos || []).indexOf(turnoFiltro) > -1;
+    });
     const porLocal = {};
-    painel.itens.forEach(function (i) {
+    itensFiltrados.forEach(function (i) {
       const L = porLocal[i.local] = porLocal[i.local] || { total: 0, feitos: 0, atividades: {} };
       L.total++;
       if (i.realizado) L.feitos++;
@@ -1735,7 +1796,15 @@ async function renderPainelDia() {
           corpo.appendChild(el('<span class="eyebrow" style="display:block;margin:12px 0 2px">' + escapeHtml(A.ambiente) + '</span>'));
         }
         const chips = A.turnos.map(function (t) {
-          const nomeTurno = t.turno ? String(t.turno).replace(/\s*turno\s*/i, '') : 'Dia';
+          // "Basta um turno": uma etiqueta só — pendente ("Qualquer") ou com o
+          // turno que fez.
+          if (!t.turno) {
+            const permitidos = (t.turnosPermitidos || []).map(turnoCurto).join('/');
+            return t.realizado
+              ? '<span class="tag tag--finalizada" title="Basta um turno (' + escapeHtml(permitidos) + ')">' + escapeHtml(turnoCurto(t.turnoFeito) || 'Feito') + ' ✓ ' + escapeHtml(t.hora) + '</span>'
+              : '<span class="tag tag--aberta" title="Basta um turno fazer">' + escapeHtml(permitidos ? 'Qualquer (' + permitidos + ')' : 'Qualquer turno') + ' ⏳</span>';
+          }
+          const nomeTurno = turnoCurto(t.turno);
           return t.realizado
             ? '<span class="tag tag--finalizada" title="Feito às ' + escapeHtml(t.hora) + '">' + escapeHtml(nomeTurno) + ' ✓ ' + escapeHtml(t.hora) + '</span>'
             : '<span class="tag tag--aberta" title="Pendente">' + escapeHtml(nomeTurno) + ' ⏳</span>';
@@ -2688,7 +2757,7 @@ async function renderGestaoAtividades() {
         const item = el(
           '<button type="button" class="list-item" style="width:100%;text-align:left">' +
             '<span><span class="list-item__title">' + escapeHtml(a.ATIVIDADE) + '</span>' +
-            '<div class="list-item__sub">' + escapeHtml(frequenciaLabel(a)) + (a.TURNO ? ' · ' + escapeHtml(a.TURNO) : ' · Todos os turnos') + '</div></span>' +
+            '<div class="list-item__sub">' + escapeHtml(frequenciaLabel(a)) + ' · ' + escapeHtml(turnosLabel(a)) + '</div></span>' +
             '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativa' : 'Inativa') + '</span>' +
           '</button>'
         );
@@ -2914,10 +2983,53 @@ async function renderAtividadeForm() {
   }
   periodicidade.node.addEventListener('change', function () { atualizarDetalhePeriodicidade(); });
 
-  const turnoWrap = el('<div class="field"><label>Turno (opcional — deixe vazio para valer em todos os turnos)</label><select id="selTurno"><option value="">Todos os turnos</option>' +
-    turnos.map(function (t) { return '<option value="' + escapeHtml(t.TURNO) + '">' + escapeHtml(t.TURNO) + '</option>'; }).join('') + '</select></div>');
+  // Turnos que fazem a atividade: botões marcáveis (todos marcados = vale
+  // para todos os turnos, inclusive turnos que forem criados depois). Com
+  // mais de um marcado, pergunta como contar.
+  const nomesTurnos = turnos.map(function (t) { return t.TURNO; });
+  const turnosMarcados = {};
+  const turnosAtuais = editando ? listaTurnosAtividade(editando) : [];
+  nomesTurnos.forEach(function (t) { turnosMarcados[t] = !turnosAtuais.length || turnosAtuais.indexOf(t) > -1; });
+  let modoTurno = editando && String(editando.MODO_TURNO || '').toUpperCase() === 'UM' ? 'UM' : 'CADA';
+
+  const turnoWrap = el(
+    '<div class="field"><label>Quais turnos fazem esta atividade? *</label>' +
+      '<div class="option-grid" style="grid-template-columns:repeat(' + Math.min(Math.max(nomesTurnos.length, 1), 4) + ',1fr)"></div>' +
+    '</div>'
+  );
   card.appendChild(turnoWrap);
-  const selTurno = turnoWrap.querySelector('select');
+  const turnoGrid = turnoWrap.querySelector('.option-grid');
+  const modoWrap = el(
+    '<div class="field"><label>Com mais de um turno marcado, como contar?</label>' +
+      '<div class="stack" style="gap:8px">' +
+        '<button type="button" class="option-btn modo-turno" data-m="CADA"><span>Cada turno faz</span><small>Cada turno marcado precisa fazer; cada um conta separado</small></button>' +
+        '<button type="button" class="option-btn modo-turno" data-m="UM"><span>Basta um turno no dia</span><small>Quem fizer primeiro conclui a atividade do dia</small></button>' +
+      '</div>' +
+    '</div>'
+  );
+  card.appendChild(modoWrap);
+  function desenharTurnos() {
+    turnoGrid.innerHTML = '';
+    nomesTurnos.forEach(function (t) {
+      const b = el('<button type="button" class="option-btn' + (turnosMarcados[t] ? ' is-selected' : '') + '">' + (turnosMarcados[t] ? '✓ ' : '') + escapeHtml(t) + '</button>');
+      b.onclick = function () { turnosMarcados[t] = !turnosMarcados[t]; desenharTurnos(); };
+      turnoGrid.appendChild(b);
+    });
+    const qtd = nomesTurnos.filter(function (t) { return turnosMarcados[t]; }).length;
+    modoWrap.style.display = qtd > 1 ? 'flex' : 'none';
+    modoWrap.querySelectorAll('[data-m]').forEach(function (b) {
+      b.classList.toggle('is-selected', b.dataset.m === modoTurno);
+      b.onclick = function () { modoTurno = b.dataset.m; desenharTurnos(); };
+    });
+  }
+  desenharTurnos();
+  // Valor gravado em TURNO: "" se todos estão marcados, senão os marcados
+  // separados por ";". null = nenhum marcado (erro).
+  function lerTurnos() {
+    const marcados = nomesTurnos.filter(function (t) { return turnosMarcados[t]; });
+    if (!marcados.length) return null;
+    return marcados.length === nomesTurnos.length ? '' : marcados.join(';');
+  }
 
   card.appendChild(el('<div class="divider"></div>'));
   card.appendChild(el('<strong>Exigências ao executar</strong>'));
@@ -2940,7 +3052,6 @@ async function renderAtividadeForm() {
     const idxPeriodicidade = ehFrequenciaVezes(editando.PERIODICIDADE) ? 3 : ['DIARIO', 'SEMANAL', 'MENSAL'].indexOf(editando.PERIODICIDADE);
     periodicidade.node.querySelectorAll('.option-btn')[idxPeriodicidade > -1 ? idxPeriodicidade : 0].click();
     atualizarDetalhePeriodicidade(editando.PERIODICIDADE === 'SEMANAL' ? editando.DIA_SEMANA : editando.DIA_MES);
-    if (editando.TURNO) selTurno.value = editando.TURNO;
     fotoAntes.node.querySelectorAll('.option-btn')[String(editando.FOTO_ANTES).toUpperCase() === 'SIM' ? 0 : 1].click();
     fotoDepois.node.querySelectorAll('.option-btn')[String(editando.FOTO_DEPOIS).toUpperCase() === 'SIM' ? 0 : 1].click();
     validacao.node.querySelectorAll('.option-btn')[String(editando.VALIDACAO).toUpperCase() === 'SIM' ? 0 : 1].click();
@@ -2958,7 +3069,7 @@ async function renderAtividadeForm() {
     const diaMesInput = detalheWrap.querySelector('#selDiaMes');
     const payload = {
       local: inpLocal.value.trim(), ambiente: inpAmbiente.value.trim(),
-      periodicidade: periodicidade.getValue(), turno: selTurno.value,
+      periodicidade: periodicidade.getValue(), turno: lerTurnos(), modoTurno: modoTurno,
       diaSemana: diaSemanaInput ? diaSemanaInput.value : '', diaMes: diaMesInput ? diaMesInput.value : '',
       fotoAntes: !!fotoAntes.getValue(), fotoDepois: !!fotoDepois.getValue(), validacao: !!validacao.getValue()
     };
@@ -2966,6 +3077,7 @@ async function renderAtividadeForm() {
       toast('Preencha local, ambiente e frequência.', true);
       return;
     }
+    if (payload.turno === null) { toast('Marque ao menos um turno.', true); return; }
     if (payload.periodicidade === 'PERSONALIZADA') {
       const freq = lerPersonalizada();
       if (!freq) return;
