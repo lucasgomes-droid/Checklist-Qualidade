@@ -299,7 +299,7 @@ function selecionarRef(action, p) {
       return d.ambientes.filter(function (a) { return !p.local || eq(a.LOCAL, p.local); });
     case 'getAtividades':
       return d.atividades.filter(function (a) {
-        return eq(a.LOCAL, p.local) && eq(a.AMBIENTE, p.ambiente) && eq(a.PERIODICIDADE, p.periodicidade) &&
+        return eq(a.LOCAL, p.local) && eq(a.AMBIENTE, p.ambiente) && eq(grupoPeriodicidade(a.PERIODICIDADE), grupoPeriodicidade(p.periodicidade)) &&
           (!a.TURNO || eq(a.TURNO, p.turno));
       });
   }
@@ -1303,6 +1303,9 @@ function renderNovoChecklist() {
         const box = el('<div class="stack" style="padding-bottom:14px;border-bottom:1px solid var(--line)"></div>');
         card.appendChild(box);
         box.appendChild(el('<strong>' + escapeHtml(a.ATIVIDADE) + '</strong>'));
+        if (ehFrequenciaVezes(a.PERIODICIDADE)) {
+          box.appendChild(el('<span class="subtle" style="margin-top:-8px">' + escapeHtml(frequenciaLabel(a)) + '</span>'));
+        }
 
         const resultado = choiceField(box, {
           label: 'Situação', columns: 3, required: true,
@@ -1347,6 +1350,7 @@ function renderNovoChecklist() {
           build: function () {
             return {
               idAtividade: a.ID_ATIVIDADE,
+              periodicidade: a.PERIODICIDADE,
               atividade: a.ATIVIDADE,
               resultado: resultado.getValue(),
               observacao: obsField ? obsField.getValue() : '',
@@ -1382,7 +1386,44 @@ function renderNovoChecklist() {
 }
 
 function periodicidadeLabel(p) {
-  return { DIARIO: 'Diário', SEMANAL: 'Semanal', MENSAL: 'Mensal' }[p] || p;
+  return { DIARIO: 'Diário', SEMANAL: 'Semanal', MENSAL: 'Mensal', VEZES_SEMANA: 'Vezes por semana', VEZES_MES: 'Vezes por mês' }[p] || p;
+}
+
+// Frequência personalizada ("N vezes por semana/mês"): no wizard do agente
+// ela aparece junto da opção padrão equivalente (3x por semana em Semanal,
+// 2x por mês em Mensal).
+function grupoPeriodicidade(p) {
+  if (p === 'VEZES_SEMANA') return 'SEMANAL';
+  if (p === 'VEZES_MES') return 'MENSAL';
+  return p;
+}
+function ehFrequenciaVezes(p) { return p === 'VEZES_SEMANA' || p === 'VEZES_MES'; }
+
+const DIAS_SEMANA_CURTO = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+
+function listaDiasFixos(valor) {
+  return String(valor == null ? '' : valor).split(/[\s,;]+/).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
+}
+
+// Descrição completa da frequência de uma atividade (ex.: "3x por semana
+// (Seg, Qua, Sex)", "2x por mês · dias livres", "Semanal (Sex)").
+function frequenciaLabel(a) {
+  const per = a.PERIODICIDADE;
+  if (ehFrequenciaVezes(per)) {
+    const semana = per === 'VEZES_SEMANA';
+    let txt = (Number(a.VEZES) || 1) + 'x por ' + (semana ? 'semana' : 'mês');
+    const dias = listaDiasFixos(a.DIAS_FIXOS);
+    if (dias.length) {
+      txt += ' (' + (semana ? dias.map(function (d) { return DIAS_SEMANA_CURTO[d] || d; }).join(', ') : 'dias ' + dias.join(', ')) + ')';
+    } else {
+      txt += ' · dias livres';
+    }
+    return txt;
+  }
+  const temDia = function (v) { return v !== '' && v !== null && v !== undefined; };
+  if (per === 'SEMANAL' && temDia(a.DIA_SEMANA)) return 'Semanal (' + (DIAS_SEMANA_CURTO[Number(a.DIA_SEMANA)] || a.DIA_SEMANA) + ')';
+  if (per === 'MENSAL' && temDia(a.DIA_MES)) return 'Mensal (dia ' + a.DIA_MES + ')';
+  return periodicidadeLabel(per);
 }
 
 // ------------------------- AGENTE: MEUS CHECKLISTS -------------------------
@@ -1557,6 +1598,7 @@ async function renderHistoricoAgente() {
 async function renderAdminHome() {
   // O menu aparece NA HORA; só o card do resumo do dia espera a planilha
   // (antes a tela inteira ficava em "Carregando" até o painel responder).
+  S.gestaoAtivLocal = null; // a lista de atividades volta a abrir pelos locais
   appendHtml(app, screenHeader('Painel da Qualidade', 'Olá, ' + S.usuario.NOME));
   const body = el(
     '<div class="stack" id="body" style="margin-top:4px">' +
@@ -1642,7 +1684,8 @@ async function renderPainelDia() {
     itens.forEach(function (i) {
       listCard.appendChild(el(
         '<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)">' +
-          '<span><strong>' + escapeHtml(i.atividade) + '</strong><div class="subtle">' + escapeHtml(i.local) + ' · ' + escapeHtml(i.ambiente) + (i.turno ? ' · ' + escapeHtml(i.turno) : '') + '</div></span>' +
+          '<span><strong>' + escapeHtml(i.atividade) + '</strong><div class="subtle">' + escapeHtml(i.local) + ' · ' + escapeHtml(i.ambiente) + (i.turno ? ' · ' + escapeHtml(i.turno) : '') + '</div>' +
+          (i.nota ? '<div class="subtle" style="color:var(--st-tratamento)">' + escapeHtml(i.nota) + '</div>' : '') + '</span>' +
           (i.realizado ? '<span class="tag tag--finalizada">Feito ' + escapeHtml(i.hora) + '</span>' : '<span class="tag tag--aberta">Pendente</span>') +
         '</div>'
       ));
@@ -2203,7 +2246,7 @@ function renderRefazerListAgente(wrap, rows) {
     item.onclick = function () {
       S.wizard = {
         type: 'checklist', step: 'itens',
-        periodicidade: c.PERIODICIDADE, turno: c.TURNO, local: c.LOCAL, ambiente: c.AMBIENTE
+        periodicidade: grupoPeriodicidade(c.PERIODICIDADE), turno: c.TURNO, local: c.LOCAL, ambiente: c.AMBIENTE
       };
       go('novoChecklist');
     };
@@ -2505,20 +2548,28 @@ async function renderUsuarioForm() {
 // planilha (aba ATIVIDADES) continua podendo ser editada diretamente.
 
 async function renderGestaoAtividades() {
+  // Duas camadas: primeiro só os locais (Fábrica, Casarão…) com o total de
+  // atividades de cada um; tocando num local, abre a lista dele separada por
+  // ambiente. O local aberto fica em S.gestaoAtivLocal, assim ao salvar/
+  // voltar de uma atividade a tela volta para o mesmo local.
+  const localAberto = S.gestaoAtivLocal || null;
   appendHtml(app,
-    screenHeader('Cadastros', 'Atividades de limpeza') +
-    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+    screenHeader('Cadastros', localAberto || 'Atividades de limpeza',
+      localAberto ? 'Atividades de limpeza deste local, por ambiente' : 'Toque em um local para ver as atividades dele') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">' + (localAberto ? '← Locais' : '← Voltar') + '</button>'
   );
-  document.getElementById('btnVoltar').onclick = function () { go('adminHome'); };
+  document.getElementById('btnVoltar').onclick = function () {
+    if (localAberto) go('gestaoAtividades', { gestaoAtivLocal: null });
+    else go('adminHome');
+  };
 
-  const btnNovo = el('<button class="btn btn--primary btn--block">+ Nova atividade</button>');
+  const btnNovo = el('<button class="btn btn--primary btn--block">+ Nova atividade' + (localAberto ? ' em ' + escapeHtml(localAberto) : '') + '</button>');
   app.appendChild(btnNovo);
   btnNovo.onclick = function () { go('atividadeForm', { atividadeEditando: null }); };
 
   const filterWrap = el(
     '<div class="filters" style="margin-top:12px">' +
-      '<select id="fLocal"><option value="">Todos os locais</option></select>' +
-      '<button type="button" class="btn btn--outline btn--sm is-active" data-f="ativas">Ativas</button>' +
+      '<button type="button" class="btn btn--outline btn--sm" data-f="ativas">Ativas</button>' +
       '<button type="button" class="btn btn--outline btn--sm" data-f="todas">Todas</button>' +
     '</div>'
   );
@@ -2526,41 +2577,71 @@ async function renderGestaoAtividades() {
   const listWrap = el('<div class="stack" id="list" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
   app.appendChild(listWrap);
 
-  const selLocal = filterWrap.querySelector('#fLocal');
-  api('getLocais', {}).then(function (locais) {
-    locais.forEach(function (l) { selLocal.appendChild(el('<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>')); });
-  }).catch(function () {});
+  const todas = await api('getAtividadesAdmin', {}).catch(function () { return []; });
+  const ehAtiva = function (a) { return String(a.ATIVO).toUpperCase() === 'SIM'; };
 
-  let filtroStatus = 'ativas';
-  async function load() {
-    listWrap.innerHTML = '<p class="subtle">Carregando…</p>';
-    const rows = await api('getAtividadesAdmin', { local: selLocal.value }).catch(function () { return []; });
-    const filtradas = filtroStatus === 'ativas' ? rows.filter(function (a) { return String(a.ATIVO).toUpperCase() === 'SIM'; }) : rows;
+  function mostrar() {
+    const filtro = S.gestaoAtivFiltro || 'ativas';
+    filterWrap.querySelectorAll('button[data-f]').forEach(function (b) { b.classList.toggle('is-active', b.dataset.f === filtro); });
+    const rows = filtro === 'ativas' ? todas.filter(ehAtiva) : todas;
     listWrap.innerHTML = '';
-    if (!filtradas.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🧾</span>Nenhuma atividade encontrada.</div>')); return; }
-    filtradas.forEach(function (a) {
-      const ativo = String(a.ATIVO).toUpperCase() === 'SIM';
-      const item = el(
-        '<button type="button" class="list-item" style="width:100%">' +
-          '<span><span class="list-item__title">' + escapeHtml(a.ATIVIDADE) + '</span>' +
-          '<div class="list-item__sub">' + escapeHtml(a.LOCAL) + ' · ' + escapeHtml(a.AMBIENTE) + '</div>' +
-          '<div class="list-item__sub">' + periodicidadeLabel(a.PERIODICIDADE) + (a.TURNO ? ' · ' + escapeHtml(a.TURNO) : ' · Todos os turnos') + '</div></span>' +
-          '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativa' : 'Inativa') + '</span>' +
-        '</button>'
-      );
-      item.onclick = function () { go('atividadeForm', { atividadeEditando: a }); };
-      listWrap.appendChild(item);
+
+    if (!localAberto) {
+      // ---- camada 1: locais ----
+      const porLocal = {};
+      rows.forEach(function (a) {
+        const g = porLocal[a.LOCAL] = porLocal[a.LOCAL] || { total: 0, inativas: 0, ambientes: {} };
+        g.total++;
+        if (!ehAtiva(a)) g.inativas++;
+        g.ambientes[a.AMBIENTE] = true;
+      });
+      const locais = Object.keys(porLocal).sort(function (x, y) { return x.localeCompare(y); });
+      if (!locais.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🧾</span>Nenhuma atividade encontrada.</div>')); return; }
+      locais.forEach(function (local) {
+        const g = porLocal[local];
+        const nAmb = Object.keys(g.ambientes).length;
+        const item = el(
+          '<button type="button" class="list-item" style="width:100%;padding:16px">' +
+            '<span class="row" style="gap:12px"><span style="font-size:22px">📍</span>' +
+            '<span><span class="list-item__title">' + escapeHtml(local) + '</span>' +
+            '<div class="list-item__sub">' + g.total + ' atividade' + (g.total > 1 ? 's' : '') + ' · ' + nAmb + ' ambiente' + (nAmb > 1 ? 's' : '') +
+            (g.inativas ? ' · ' + g.inativas + ' inativa' + (g.inativas > 1 ? 's' : '') : '') + '</div></span></span>' +
+            '<span>›</span>' +
+          '</button>'
+        );
+        item.onclick = function () { go('gestaoAtividades', { gestaoAtivLocal: local }); };
+        listWrap.appendChild(item);
+      });
+      return;
+    }
+
+    // ---- camada 2: atividades do local, agrupadas por ambiente ----
+    const doLocal = rows.filter(function (a) { return a.LOCAL === localAberto; });
+    if (!doLocal.length) { listWrap.appendChild(el('<div class="empty"><span class="ic">🧾</span>Nenhuma atividade neste local.</div>')); return; }
+    const porAmbiente = {};
+    doLocal.forEach(function (a) { (porAmbiente[a.AMBIENTE] = porAmbiente[a.AMBIENTE] || []).push(a); });
+    Object.keys(porAmbiente).sort(function (x, y) { return x.localeCompare(y); }).forEach(function (amb) {
+      const lista = porAmbiente[amb];
+      listWrap.appendChild(el('<span class="eyebrow" style="display:block;margin-top:8px">' + escapeHtml(amb) + ' · ' + lista.length + '</span>'));
+      lista.forEach(function (a) {
+        const ativo = ehAtiva(a);
+        const item = el(
+          '<button type="button" class="list-item" style="width:100%;text-align:left">' +
+            '<span><span class="list-item__title">' + escapeHtml(a.ATIVIDADE) + '</span>' +
+            '<div class="list-item__sub">' + escapeHtml(frequenciaLabel(a)) + (a.TURNO ? ' · ' + escapeHtml(a.TURNO) : ' · Todos os turnos') + '</div></span>' +
+            '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativa' : 'Inativa') + '</span>' +
+          '</button>'
+        );
+        item.onclick = function () { go('atividadeForm', { atividadeEditando: a }); };
+        listWrap.appendChild(item);
+      });
     });
   }
-  selLocal.onchange = load;
+
   filterWrap.querySelectorAll('button[data-f]').forEach(function (b) {
-    b.onclick = function () {
-      filtroStatus = b.dataset.f;
-      filterWrap.querySelectorAll('button[data-f]').forEach(function (x) { x.classList.toggle('is-active', x === b); });
-      load();
-    };
+    b.onclick = function () { S.gestaoAtivFiltro = b.dataset.f; mostrar(); };
   });
-  load();
+  mostrar();
 }
 
 async function renderAtividadeForm() {
@@ -2609,6 +2690,11 @@ async function renderAtividadeForm() {
     dlAmbientes.innerHTML = ambientes.map(function (a) { return '<option value="' + escapeHtml(a.AMBIENTE) + '">'; }).join('');
   }
   inpLocal.addEventListener('change', atualizarSugestoesAmbiente);
+  // Nova atividade aberta de dentro de um local: já vem com o local preenchido.
+  if (!editando && S.gestaoAtivLocal) {
+    inpLocal.value = S.gestaoAtivLocal;
+    atualizarSugestoesAmbiente();
+  }
 
   // Editando um item existente: um campo de descrição só, como antes.
   // Cadastrando novo: uma lista de itens — o admin pode adicionar quantas
@@ -2630,17 +2716,131 @@ async function renderAtividadeForm() {
   }
 
   const periodicidade = choiceField(card, {
-    label: 'Frequência *', columns: 3,
-    options: [{ value: 'DIARIO', label: 'Diário' }, { value: 'SEMANAL', label: 'Semanal' }, { value: 'MENSAL', label: 'Mensal' }]
+    label: 'Frequência *', columns: 2,
+    options: [
+      { value: 'DIARIO', label: 'Diário' }, { value: 'SEMANAL', label: 'Semanal' },
+      { value: 'MENSAL', label: 'Mensal' }, { value: 'PERSONALIZADA', label: 'Personalizada' }
+    ]
   });
+
+  // Frequência personalizada: "N vezes por semana/mês", com dias livres
+  // (qualquer dia do período) ou dias fixos (ex.: seg/qua/sex). Estado fica
+  // aqui para não se perder quando a área é redesenhada.
+  const pers = { vezes: '', por: 'SEMANA', modo: 'LIVRE', diasSemana: [], diasMes: '' };
+  if (editando && ehFrequenciaVezes(editando.PERIODICIDADE)) {
+    pers.vezes = String(editando.VEZES || '');
+    pers.por = editando.PERIODICIDADE === 'VEZES_MES' ? 'MES' : 'SEMANA';
+    const dias = listaDiasFixos(editando.DIAS_FIXOS);
+    if (dias.length) {
+      pers.modo = 'FIXO';
+      if (pers.por === 'SEMANA') pers.diasSemana = dias; else pers.diasMes = dias.join(', ');
+    }
+  }
+
+  function renderPersonalizada() {
+    detalheWrap.innerHTML = '';
+    const semana = pers.por === 'SEMANA';
+
+    const linha = el(
+      '<div class="grid2">' +
+        '<div class="field"><label>Quantas vezes? *</label><input type="number" id="inpVezes" min="1" max="' + (semana ? 7 : 31) + '" inputmode="numeric" placeholder="Ex: 3"></div>' +
+        '<div class="field"><label>Por *</label><select id="selPor"><option value="SEMANA">Semana</option><option value="MES">Mês</option></select></div>' +
+      '</div>'
+    );
+    detalheWrap.appendChild(linha);
+    const inpVezes = linha.querySelector('#inpVezes');
+    const selPor = linha.querySelector('#selPor');
+    inpVezes.value = pers.vezes;
+    selPor.value = pers.por;
+    inpVezes.addEventListener('input', function () { pers.vezes = inpVezes.value; atualizarDica(); });
+    selPor.addEventListener('change', function () { pers.por = selPor.value; renderPersonalizada(); });
+
+    const modoWrap = el(
+      '<div class="field"><label>Em quais dias?</label><div class="option-grid" style="grid-template-columns:1fr 1fr">' +
+        '<button type="button" class="option-btn" data-m="LIVRE">Dias livres</button>' +
+        '<button type="button" class="option-btn" data-m="FIXO">Dias fixos</button>' +
+      '</div></div>'
+    );
+    detalheWrap.appendChild(modoWrap);
+    modoWrap.querySelectorAll('[data-m]').forEach(function (b) {
+      b.classList.toggle('is-selected', b.dataset.m === pers.modo);
+      b.onclick = function () { pers.modo = b.dataset.m; renderPersonalizada(); };
+    });
+
+    if (pers.modo === 'FIXO') {
+      if (semana) {
+        const diasWrap = el('<div class="field"><label>Marque os dias da semana</label><div class="option-grid" style="grid-template-columns:repeat(7,1fr);gap:6px"></div></div>');
+        const grid = diasWrap.querySelector('.option-grid');
+        DIAS_SEMANA_CURTO.forEach(function (nome, i) {
+          const b = el('<button type="button" class="option-btn" style="padding:12px 2px;font-size:13px">' + nome + '</button>');
+          b.classList.toggle('is-selected', pers.diasSemana.indexOf(i) > -1);
+          b.onclick = function () {
+            const pos = pers.diasSemana.indexOf(i);
+            if (pos > -1) pers.diasSemana.splice(pos, 1); else pers.diasSemana.push(i);
+            pers.diasSemana.sort(function (x, y) { return x - y; });
+            b.classList.toggle('is-selected', pos === -1);
+            atualizarDica();
+          };
+          grid.appendChild(b);
+        });
+        detalheWrap.appendChild(diasWrap);
+      } else {
+        const diasWrap = el('<div class="field"><label>Dias do mês (separe por vírgula)</label><input type="text" inputmode="numeric" id="inpDiasMes" placeholder="Ex: 5, 20"></div>');
+        const inp = diasWrap.querySelector('input');
+        inp.value = pers.diasMes;
+        inp.addEventListener('input', function () { pers.diasMes = inp.value; atualizarDica(); });
+        detalheWrap.appendChild(diasWrap);
+      }
+    }
+
+    const dica = el('<p class="subtle"></p>');
+    detalheWrap.appendChild(dica);
+    function atualizarDica() {
+      const n = parseInt(pers.vezes, 10);
+      const qtd = n > 0 ? n + 'x' : 'N vezes';
+      const periodo = semana ? 'semana' : 'mês';
+      if (pers.modo === 'LIVRE') {
+        dica.textContent = 'O agente pode fazer ' + qtd + ' em quaisquer dias da ' + periodo + (semana ? ' (segunda a domingo)' : '') +
+          '. Só fica atrasada se a ' + periodo + ' terminar sem completar.';
+      } else {
+        const marcados = semana ? pers.diasSemana.length : listaDiasFixos(pers.diasMes).length;
+        dica.textContent = 'Cada dia marcado vira um dia previsto, e fica atrasada se não for feita no dia. ' +
+          'Marcados: ' + marcados + (n > 0 ? ' de ' + n : '') + '.';
+      }
+    }
+    atualizarDica();
+  }
+
+  // Lê e valida a frequência personalizada. Retorna os campos do payload ou
+  // null (já mostrando o erro).
+  function lerPersonalizada() {
+    const semana = pers.por === 'SEMANA';
+    const n = Number(pers.vezes);
+    if (!Number.isInteger(n) || n < 1 || n > (semana ? 7 : 31)) {
+      toast(semana ? 'Informe quantas vezes por semana (1 a 7).' : 'Informe quantas vezes por mês (1 a 31).', true);
+      return null;
+    }
+    let dias = [];
+    if (pers.modo === 'FIXO') {
+      dias = semana ? pers.diasSemana.slice() : listaDiasFixos(pers.diasMes);
+      if (!semana && dias.some(function (d) { return !Number.isInteger(d) || d < 1 || d > 31; })) {
+        toast('Dias do mês inválidos (use números de 1 a 31).', true); return null;
+      }
+      dias = dias.filter(function (d, i) { return dias.indexOf(d) === i; });
+      if (dias.length !== n) { toast('Marque exatamente ' + n + ' dia(s) fixo(s), ou escolha "Dias livres".', true); return null; }
+    }
+    return { periodicidade: semana ? 'VEZES_SEMANA' : 'VEZES_MES', vezes: n, diasFixos: dias.join(';') };
+  }
 
   const detalheWrap = el('<div class="stack" style="display:none"></div>');
   card.appendChild(detalheWrap);
   function atualizarDetalhePeriodicidade(valorInicial) {
     const p = periodicidade.getValue();
     detalheWrap.innerHTML = '';
-    detalheWrap.style.display = (p === 'SEMANAL' || p === 'MENSAL') ? 'flex' : 'none';
-    if (p === 'SEMANAL') {
+    detalheWrap.style.display = (p === 'SEMANAL' || p === 'MENSAL' || p === 'PERSONALIZADA') ? 'flex' : 'none';
+    if (p === 'PERSONALIZADA') {
+      renderPersonalizada();
+    } else if (p === 'SEMANAL') {
       const dias = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
       const wrap = el('<div class="field"><label>Dia da semana (opcional — deixe vazio para qualquer dia)</label><select id="selDiaSemana"><option value="">Qualquer dia</option>' +
         dias.map(function (d, i) { return '<option value="' + i + '">' + d + '</option>'; }).join('') + '</select></div>');
@@ -2677,7 +2877,7 @@ async function renderAtividadeForm() {
     inpLocal.value = editando.LOCAL;
     inpAmbiente.value = editando.AMBIENTE;
     await atualizarSugestoesAmbiente();
-    const idxPeriodicidade = ['DIARIO', 'SEMANAL', 'MENSAL'].indexOf(editando.PERIODICIDADE);
+    const idxPeriodicidade = ehFrequenciaVezes(editando.PERIODICIDADE) ? 3 : ['DIARIO', 'SEMANAL', 'MENSAL'].indexOf(editando.PERIODICIDADE);
     periodicidade.node.querySelectorAll('.option-btn')[idxPeriodicidade > -1 ? idxPeriodicidade : 0].click();
     atualizarDetalhePeriodicidade(editando.PERIODICIDADE === 'SEMANAL' ? editando.DIA_SEMANA : editando.DIA_MES);
     if (editando.TURNO) selTurno.value = editando.TURNO;
@@ -2705,6 +2905,11 @@ async function renderAtividadeForm() {
     if (!payload.local || !payload.ambiente || !payload.periodicidade) {
       toast('Preencha local, ambiente e frequência.', true);
       return;
+    }
+    if (payload.periodicidade === 'PERSONALIZADA') {
+      const freq = lerPersonalizada();
+      if (!freq) return;
+      Object.assign(payload, freq);
     }
     btn.disabled = true; btn.textContent = 'Salvando…';
     try {
