@@ -322,3 +322,23 @@ button,.list-item,.option-btn,.photo-btn,a{touch-action:manipulation;-webkit-tap
 .modo-turno{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;padding:12px 14px}
 .modo-turno small{font-weight:400;font-size:12.5px;color:var(--ink-soft)}
 .modo-turno.is-selected small{color:var(--accent-dark)}
+
+/* Dashboard geral: cards escuros com gráficos (mesmo estilo dos dashboards dos armazéns) */
+.dash-card{background:#151b21;border-radius:14px;padding:14px 14px 10px;color:#eef1ec;overflow-x:auto}
+.dash-card h3{font-size:15px;margin:0 0 2px;color:#fff}
+.dash-card__sub{font-size:12px;color:#aab3ab;margin:0 0 8px}
+.dash-card__nota{font-size:12px;color:#c3cbc4;margin:6px 0 2px;line-height:1.5}
+.dash-card__nota b{color:#fff}
+.dash-card svg{display:block;min-width:360px}
+
+/* Login: os dois perfis como botões grandes que abrem a lista de nomes */
+.login-grupo{padding:0;overflow:hidden;margin-top:12px}
+.login-grupo__head{display:flex;align-items:center;gap:14px;width:100%;padding:18px 18px;background:#fff;border:none;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.login-grupo__head:active{background:#eef3ea}
+.login-grupo.is-open .login-grupo__head{border-bottom:1px solid var(--line)}
+.login-grupo__icone{font-size:26px;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:#eef5e7;border-radius:12px;flex-shrink:0}
+.login-grupo__titulo{display:block;font-weight:700;font-size:17px}
+.login-grupo__sub{display:block;font-size:13px;color:var(--ink-soft);margin-top:2px}
+.login-grupo__seta{font-size:18px;color:var(--ink-soft)}
+.login-grupo__lista{padding:14px}
+.card.login-grupo + .card.login-grupo{margin-top:14px}

@@ -1111,29 +1111,51 @@ async function renderLoginUsuario() {
     wrap.innerHTML = '';
     if (!usuarios.length) { wrap.innerHTML = '<p class="subtle">Nenhum usuário ativo cadastrado.</p>'; return; }
 
-    // Dois blocos separados (Agente de Limpeza / Administrador da
-    // Qualidade) em vez de uma lista única com todo mundo misturado.
-    function bloco(titulo, lista) {
-      if (!lista.length) return;
-      wrap.appendChild(el('<span class="eyebrow" style="display:block;margin:14px 0 6px">' + escapeHtml(titulo) + '</span>'));
-      const card = el('<div class="card stack"></div>');
-      wrap.appendChild(card);
-      lista.forEach(function (u) {
-        const item = el(
-          '<button type="button" class="list-item" style="width:100%">' +
-            '<span class="list-item__title">' + escapeHtml(u.NOME) + '</span><span>›</span>' +
+    // Primeiro só os dois perfis (Agente de Limpeza / Administrador da
+    // Qualidade); tocando num deles, abrem os nomes daquele grupo. Tocar de
+    // novo (ou no outro perfil) fecha. Com um grupo só, ele já vem aberto.
+    const grupos = [
+      { chave: 'AGENTE_LIMPEZA', titulo: 'Agente de Limpeza', icone: '🧹', sub: 'Entrar com PIN' },
+      { chave: 'ADMIN_QUALIDADE', titulo: 'Administrador da Qualidade', icone: '🛡️', sub: 'Entrar com senha' }
+    ].map(function (g) { g.lista = usuarios.filter(function (u) { return u.PERFIL === g.chave; }); return g; })
+     .filter(function (g) { return g.lista.length; });
+    let aberto = grupos.length === 1 ? grupos[0].chave : (S.loginGrupoAberto || null);
+
+    function desenhar() {
+      wrap.innerHTML = '';
+      grupos.forEach(function (g) {
+        const estaAberto = aberto === g.chave;
+        const card = el('<div class="card login-grupo' + (estaAberto ? ' is-open' : '') + '"></div>');
+        const head = el(
+          '<button type="button" class="login-grupo__head" aria-expanded="' + estaAberto + '">' +
+            '<span class="login-grupo__icone">' + g.icone + '</span>' +
+            '<span style="flex:1;min-width:0"><span class="login-grupo__titulo">' + escapeHtml(g.titulo) + '</span>' +
+            '<span class="login-grupo__sub">' + g.lista.length + ' ' + (g.lista.length === 1 ? 'usuário' : 'usuários') + ' · ' + g.sub + '</span></span>' +
+            '<span class="login-grupo__seta">' + (estaAberto ? '▾' : '›') + '</span>' +
           '</button>'
         );
-        item.onclick = function () {
-          if (u.PERFIL === 'ADMIN_QUALIDADE') { go('loginSenha', { pendingUser: u }); }
-          else { go('loginPin', { pendingUser: u }); }
-        };
-        card.appendChild(item);
+        head.onclick = function () { aberto = estaAberto ? null : g.chave; S.loginGrupoAberto = aberto; desenhar(); };
+        card.appendChild(head);
+        if (estaAberto) {
+          const lista = el('<div class="stack login-grupo__lista"></div>');
+          g.lista.forEach(function (u) {
+            const item = el(
+              '<button type="button" class="list-item" style="width:100%">' +
+                '<span class="list-item__title">' + escapeHtml(u.NOME) + '</span><span>›</span>' +
+              '</button>'
+            );
+            item.onclick = function () {
+              if (u.PERFIL === 'ADMIN_QUALIDADE') { go('loginSenha', { pendingUser: u }); }
+              else { go('loginPin', { pendingUser: u }); }
+            };
+            lista.appendChild(item);
+          });
+          card.appendChild(lista);
+        }
+        wrap.appendChild(card);
       });
     }
-
-    bloco('Agente de Limpeza', usuarios.filter(function (u) { return u.PERFIL === 'AGENTE_LIMPEZA'; }));
-    bloco('Administrador da Qualidade', usuarios.filter(function (u) { return u.PERFIL === 'ADMIN_QUALIDADE'; }));
+    desenhar();
   } catch (e) { /* toast já mostrado */ }
 }
 
