@@ -1673,22 +1673,82 @@ async function renderPainelDia() {
     '</div>'
   );
   body.appendChild(filterWrap);
-  const listCard = el('<div class="card stack"></div>');
-  body.appendChild(listCard);
+  const listWrap = el('<div class="stack"></div>');
+  body.appendChild(listWrap);
 
+  // Agrupado: Local (card que abre/fecha) → Ambiente → Atividade, com uma
+  // etiqueta por turno em vez de repetir a mesma atividade 3 vezes.
+  // Locais com pendência começam abertos; os já concluídos, fechados.
+  const abertos = {};
   function showList(filtro) {
     filterWrap.querySelectorAll('button').forEach(function (b) { b.classList.toggle('is-active', b.dataset.f === filtro); });
-    listCard.innerHTML = '';
-    const itens = filtro === 'pendentes' ? painel.itens.filter(function (i) { return !i.realizado; }) : painel.itens;
-    if (!itens.length) { listCard.appendChild(el('<div class="empty"><span class="ic">✅</span>Nada pendente por aqui.</div>')); return; }
-    itens.forEach(function (i) {
-      listCard.appendChild(el(
-        '<div class="row between" style="padding:8px 0;border-bottom:1px solid var(--line)">' +
-          '<span><strong>' + escapeHtml(i.atividade) + '</strong><div class="subtle">' + escapeHtml(i.local) + ' · ' + escapeHtml(i.ambiente) + (i.turno ? ' · ' + escapeHtml(i.turno) : '') + '</div>' +
-          (i.nota ? '<div class="subtle" style="color:var(--st-tratamento)">' + escapeHtml(i.nota) + '</div>' : '') + '</span>' +
-          (i.realizado ? '<span class="tag tag--finalizada">Feito ' + escapeHtml(i.hora) + '</span>' : '<span class="tag tag--aberta">Pendente</span>') +
-        '</div>'
-      ));
+    listWrap.innerHTML = '';
+
+    const porLocal = {};
+    painel.itens.forEach(function (i) {
+      const L = porLocal[i.local] = porLocal[i.local] || { total: 0, feitos: 0, atividades: {} };
+      L.total++;
+      if (i.realizado) L.feitos++;
+      const k = i.ambiente + '|' + i.atividade;
+      const A = L.atividades[k] = L.atividades[k] || { ambiente: i.ambiente, atividade: i.atividade, turnos: [], nota: '' };
+      A.turnos.push(i);
+      if (i.nota) A.nota = i.nota;
+    });
+
+    const locais = Object.keys(porLocal).sort(function (x, y) {
+      const px = porLocal[x].total - porLocal[x].feitos, py = porLocal[y].total - porLocal[y].feitos;
+      return (py > 0) - (px > 0) || x.localeCompare(y); // com pendência primeiro
+    }).filter(function (l) { return filtro === 'todas' || porLocal[l].feitos < porLocal[l].total; });
+
+    if (!locais.length) { listWrap.appendChild(el('<div class="card"><div class="empty"><span class="ic">✅</span>Nada pendente por aqui.</div></div>')); return; }
+
+    locais.forEach(function (local) {
+      const L = porLocal[local];
+      const pend = L.total - L.feitos;
+      if (abertos[local] === undefined) abertos[local] = pend > 0;
+      const pct = L.total ? Math.round(L.feitos / L.total * 100) : 0;
+
+      const card = el('<div class="card stack" style="padding:0;gap:0;overflow:hidden"></div>');
+      const head = el(
+        '<button type="button" class="painel-local">' +
+          '<span style="flex:1;min-width:0">' +
+            '<span class="list-item__title">' + escapeHtml(local) + '</span>' +
+            '<div class="list-item__sub">' + L.feitos + ' de ' + L.total + ' feitas' + (pend ? ' · <strong style="color:var(--st-aberta)">' + pend + ' pendente' + (pend > 1 ? 's' : '') + '</strong>' : ' · ✓ tudo feito') + '</div>' +
+            '<div class="bar-track" style="margin-top:8px;height:6px"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+          '</span>' +
+          '<span class="painel-local__seta">' + (abertos[local] ? '▾' : '▸') + '</span>' +
+        '</button>'
+      );
+      card.appendChild(head);
+      const corpo = el('<div class="stack" style="gap:0;padding:0 16px 8px"></div>');
+      if (!abertos[local]) corpo.style.display = 'none';
+      card.appendChild(corpo);
+      head.onclick = function () { abertos[local] = !abertos[local]; showList(filtro); };
+
+      let ambienteAtual = null;
+      Object.keys(L.atividades).sort().forEach(function (k) {
+        const A = L.atividades[k];
+        const temPendente = A.turnos.some(function (t) { return !t.realizado; });
+        if (filtro === 'pendentes' && !temPendente) return;
+        if (A.ambiente !== ambienteAtual) {
+          ambienteAtual = A.ambiente;
+          corpo.appendChild(el('<span class="eyebrow" style="display:block;margin:12px 0 2px">' + escapeHtml(A.ambiente) + '</span>'));
+        }
+        const chips = A.turnos.map(function (t) {
+          const nomeTurno = t.turno ? String(t.turno).replace(/\s*turno\s*/i, '') : 'Dia';
+          return t.realizado
+            ? '<span class="tag tag--finalizada" title="Feito às ' + escapeHtml(t.hora) + '">' + escapeHtml(nomeTurno) + ' ✓ ' + escapeHtml(t.hora) + '</span>'
+            : '<span class="tag tag--aberta" title="Pendente">' + escapeHtml(nomeTurno) + ' ⏳</span>';
+        }).join('');
+        corpo.appendChild(el(
+          '<div class="painel-ativ">' +
+            '<span style="min-width:0"><strong>' + escapeHtml(A.atividade) + '</strong>' +
+            (A.nota ? '<div class="subtle" style="color:var(--st-tratamento)">' + escapeHtml(A.nota) + '</div>' : '') + '</span>' +
+            '<span class="painel-ativ__turnos">' + chips + '</span>' +
+          '</div>'
+        ));
+      });
+      listWrap.appendChild(card);
     });
   }
   filterWrap.querySelectorAll('button').forEach(function (b) { b.onclick = function () { showList(b.dataset.f); }; });

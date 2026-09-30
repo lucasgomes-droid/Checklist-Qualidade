@@ -147,6 +147,9 @@ input,select,textarea{font-family:inherit;font-size:16px}
   padding:13px 14px;cursor:pointer;
 }
 .list-item:active{background:#f7f9f8}
+/* <button class="list-item"> herdava o text-align:center padrão do botão:
+   título centralizado e subtítulo à esquerda, desalinhados. */
+button.list-item{text-align:left;font:inherit;color:inherit;width:100%}
 .list-item__title{font-weight:600;font-size:14.5px}
 .list-item__sub{color:var(--ink-soft);font-size:12.5px;margin-top:2px}
 
@@ -215,8 +218,11 @@ input,select,textarea{font-family:inherit;font-size:16px}
 .toast.is-error{background:var(--st-risco)}
 .toast.is-success{background:var(--st-finalizada)}
 
-.filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px}
-.filters select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fff;font-size:13px}
+.filters{display:flex;flex-wrap:wrap;gap:8px;padding-bottom:2px}
+.filters select{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fff;font-size:13px;flex:1 1 150px;min-width:0;max-width:100%}
+.filters input[type=date]{border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:#fff;font-size:13px;flex:1 1 140px;min-width:0}
+/* filtro selecionado (Ativas/Todas, Só pendentes/Todas, abas do histórico) */
+.btn--outline.is-active{background:#eef5e7;border-color:var(--accent);color:var(--accent-dark)}
 
 .login-logo{
   display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:6px;
@@ -283,3 +289,21 @@ button,.list-item,.option-btn,.photo-btn,a{touch-action:manipulation;-webkit-tap
 @keyframes skeleton{from{background-position:200% 0}to{background-position:-200% 0}}
 
 .btn .spinner{width:16px;height:16px;border-width:2px}
+
+/* Painel do dia agrupado por local */
+.painel-local{
+  display:flex;align-items:center;gap:12px;width:100%;padding:14px 16px;
+  background:#fff;border:none;cursor:pointer;text-align:left;font:inherit;color:inherit;
+}
+.painel-local:active{background:#eef3ea}
+.painel-local__seta{font-size:14px;color:var(--ink-soft);width:14px;text-align:center}
+.painel-ativ{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:9px 0;border-bottom:1px solid var(--line);font-size:14px;
+}
+.painel-ativ:last-child{border-bottom:none}
+.painel-ativ__turnos{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;flex-shrink:0;max-width:55%}
+@media (max-width:480px){
+  .painel-ativ{flex-direction:column;align-items:flex-start;gap:6px}
+  .painel-ativ__turnos{justify-content:flex-start;max-width:none}
+}
