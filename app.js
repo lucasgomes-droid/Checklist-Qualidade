@@ -1047,8 +1047,10 @@ function render() {
     dashValidacao: renderDashValidacao,
     dashOcorrencias: renderDashOcorrencias,
     dashFotos: renderDashFotos,
+    dashGeral: renderDashGeral,
     relatorios: renderRelatorios,
-    relatorioDetalhe: renderRelatorioDetalhe
+    relatorioDetalhe: renderRelatorioDetalhe,
+    resumoGerencial: renderResumoGerencial
   };
   (screens[S.screen] || renderLoginUsuario)();
   updateChrome();
@@ -3439,6 +3441,7 @@ function lerRangeFiltro() {
 function renderDashboardHub() {
   appendHtml(app, screenHeader('Dashboards', 'Checklist da Qualidade') + '<div class="stack"></div>');
   const wrap = app.querySelector('.stack:last-child');
+  wrap.appendChild(el(menuCard('🗂️', 'Dashboard geral', 'Todos os indicadores e gráficos numa página só', 'dashGeral')));
   wrap.appendChild(el(menuCard('🧹', 'Checklist de Limpeza', 'Previsto, realizado, pendente e atrasado — por local', 'dashChecklist')));
   wrap.appendChild(el(menuCard('👥', 'Por Agente e Turno', 'Realizados agrupados por agente e por turno', 'dashAgenteTurno')));
   wrap.appendChild(el(menuCard('✅', 'Validação da Qualidade', 'Aprovados, reprovados e não conformidades', 'dashValidacao')));
@@ -3753,6 +3756,8 @@ const REPORTS = {
 function renderRelatorios() {
   appendHtml(app, screenHeader('Relatórios', 'Baixe em CSV (Excel/Sheets) ou PDF') + '<div class="stack"></div>');
   const wrap = app.querySelector('.stack:last-child');
+  wrap.appendChild(el(menuCard('📊', 'Resumo gerencial de limpeza', 'PDF com gráficos e análise — por semana, mês ou datas', 'resumoGerencial')));
+  bindMenuCards();
   Object.keys(REPORTS).forEach(function (key) {
     const r = REPORTS[key];
     const card = el(menuCard(r.icone, r.titulo, r.descricao, 'x'));
@@ -3895,4 +3900,672 @@ function downloadBase64File(filename, base64, mime) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+// ------------------------- RESUMO GERENCIAL DE LIMPEZA (PDF em slides) -------------------------
+// Mesmo modelo do "Resumo Geral" do app de Gestão de Armazéns: páginas em
+// formato de slide (16:9) com o fundo institucional (fundo-relatorio.jpg,
+// que já traz o logo e a faixa verde/laranja), capa, sumário executivo,
+// leitura gerencial, gráficos, ambientes críticos, prioridades, plano de ação
+// e conclusão. O relatório abre numa aba nova com o botão "Imprimir / Salvar
+// em PDF" (no celular: Compartilhar → Imprimir → Salvar como PDF).
+
+const RESUMO_CORES = {
+  realizado: '#5e9030', previsto: '#c9cfc2', neutro: '#3b82c4',
+  aprovado: '#2f7d4a', reprovado: '#c63d3d', pendente: '#b8741a', roxo: '#7c5ad6'
+};
+
+function periodoResumoPreset(tipo) {
+  const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+  const d = function (x) { return new Date(x.getTime()); };
+  const nomesMes = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+  const pad = function (n) { return String(n).padStart(2, '0'); };
+  let ini, fim, rotulo;
+  if (tipo === 'hoje') {
+    ini = d(hoje);
+    if (new Date().getHours() < 6) ini.setDate(ini.getDate() - 1);
+    return { dataInicial: dateToBR(ini), dataFinal: dateToBR(ini), rotulo: 'Dia ' + dateToBR(ini) };
+  }
+  if (tipo === 'semana' || tipo === 'semanaPassada') {
+    ini = d(hoje); ini.setDate(ini.getDate() - ((ini.getDay() + 6) % 7));
+    if (tipo === 'semanaPassada') { ini.setDate(ini.getDate() - 7); fim = d(ini); fim.setDate(fim.getDate() + 6); }
+    else fim = d(hoje);
+    rotulo = 'Semana de ' + pad(ini.getDate()) + '/' + pad(ini.getMonth() + 1) + ' a ' + pad(fim.getDate()) + '/' + pad(fim.getMonth() + 1);
+  } else if (tipo === 'mes' || tipo === 'mesPassado') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth() - (tipo === 'mesPassado' ? 1 : 0), 1);
+    fim = tipo === 'mesPassado' ? new Date(hoje.getFullYear(), hoje.getMonth(), 0) : d(hoje);
+    rotulo = 'Mês de ' + nomesMes[ini.getMonth()] + ' (dia ' + pad(ini.getDate()) + ' a dia ' + pad(fim.getDate()) + ')';
+  }
+  return { dataInicial: dateToBR(ini), dataFinal: dateToBR(fim), rotulo: rotulo };
+}
+
+function renderResumoGerencial() {
+  appendHtml(app,
+    screenHeader('Relatórios', 'Resumo gerencial de limpeza', 'PDF em slides com gráficos, no padrão do Resumo Geral') +
+    '<button class="btn btn--outline btn--sm" id="btnVoltar" style="align-self:flex-start;margin-top:-8px">← Voltar</button>'
+  );
+  document.getElementById('btnVoltar').onclick = function () { go('relatorios'); };
+
+  const card = el('<div class="card stack"></div>');
+  app.appendChild(card);
+  const opcoes = [
+    ['semana', 'Esta semana'], ['semanaPassada', 'Semana passada'],
+    ['mes', 'Este mês'], ['mesPassado', 'Mês passado'], ['custom', 'Datas personalizadas']
+  ];
+  let escolha = 'mes';
+  const grade = el('<div class="field"><label>Período do resumo</label><div class="option-grid" style="grid-template-columns:repeat(2,1fr)"></div></div>');
+  card.appendChild(grade);
+  const datas = el(
+    '<div class="grid2" style="display:none">' +
+      '<div class="field"><label>De</label><input type="date" id="resIni"></div>' +
+      '<div class="field"><label>Até</label><input type="date" id="resFim"></div>' +
+    '</div>'
+  );
+  card.appendChild(datas);
+  const info = el('<p class="subtle"></p>');
+  card.appendChild(info);
+
+  function atualizar() {
+    grade.querySelectorAll('.option-btn').forEach(function (b) { b.classList.toggle('is-selected', b.dataset.v === escolha); });
+    datas.style.display = escolha === 'custom' ? 'grid' : 'none';
+    if (escolha !== 'custom') {
+      const p = periodoResumoPreset(escolha);
+      info.textContent = p.rotulo + ' · ' + p.dataInicial + ' a ' + p.dataFinal;
+    } else {
+      info.textContent = 'Escolha a data inicial e a final.';
+    }
+  }
+  opcoes.forEach(function (o) {
+    const b = el('<button type="button" class="option-btn" data-v="' + o[0] + '"' + (o[0] === 'custom' ? ' style="grid-column:1/-1"' : '') + '>' + o[1] + '</button>');
+    b.onclick = function () { escolha = o[0]; atualizar(); };
+    grade.querySelector('.option-grid').appendChild(b);
+  });
+  atualizar();
+
+  const btn = el('<button class="btn btn--primary btn--block">📊 Gerar resumo</button>');
+  card.appendChild(btn);
+  card.appendChild(el('<p class="subtle">Abre numa aba nova. Lá, toque em "Imprimir / Salvar em PDF". O período anterior (mesma quantidade de dias, logo antes) é usado para calcular as variações.</p>'));
+
+  btn.onclick = async function () {
+    let periodo;
+    if (escolha === 'custom') {
+      const a = document.getElementById('resIni').value, b = document.getElementById('resFim').value;
+      if (!a || !b) { toast('Escolha as duas datas.', true); return; }
+      if (a > b) { toast('A data inicial deve ser antes da final.', true); return; }
+      const dA = new Date(a + 'T00:00:00'), dB = new Date(b + 'T00:00:00');
+      periodo = { dataInicial: dateToBR(dA), dataFinal: dateToBR(dB), rotulo: 'Período de ' + dateToBR(dA) + ' a ' + dateToBR(dB) };
+    } else {
+      periodo = periodoResumoPreset(escolha);
+    }
+    // A aba precisa ser aberta já no toque (senão o navegador bloqueia).
+    const janela = window.open('', '_blank');
+    if (!janela) { toast('O navegador bloqueou a nova aba. Libere pop-ups para este site e tente de novo.', true); return; }
+    janela.document.write('<title>Gerando resumo…</title><p style="font:16px sans-serif;padding:24px;color:#444">Gerando o resumo de limpeza… isso pode levar alguns segundos.</p>');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Gerando…';
+    try {
+      const dados = await api('getResumoLimpeza', { dataInicial: periodo.dataInicial, dataFinal: periodo.dataFinal }, { noGate: true });
+      janela.document.open();
+      janela.document.write(montarResumoHtml(dados, periodo.rotulo));
+      janela.document.close();
+    } catch (e) {
+      try { janela.close(); } catch (x) { /* nada */ }
+    }
+    btn.disabled = false; btn.textContent = '📊 Gerar resumo';
+  };
+}
+
+// ---------- gráficos em SVG (impressão nítida, sem bibliotecas) ----------
+
+function resumoEsc(s) { return escapeHtml(s); }
+
+function quebrarRotulo(txt, max) {
+  const palavras = String(txt).split(' ');
+  const linhas = [''];
+  palavras.forEach(function (p) {
+    const atual = linhas[linhas.length - 1];
+    if ((atual + ' ' + p).trim().length > max && atual) linhas.push(p);
+    else linhas[linhas.length - 1] = (atual + ' ' + p).trim();
+  });
+  return linhas.slice(0, 3);
+}
+
+// Barras verticais de uma ou duas séries, com valor escrito acima de cada
+// barra (identidade nunca só pela cor). dados: [{rotulo, a, b?}].
+function svgColunas(dados, opt) {
+  opt = opt || {};
+  const cTxt = opt.escuro ? '#f1f4ef' : '#222', cRot = opt.escuro ? '#c3cbc4' : '#333', cBase = opt.escuro ? '#56605a' : '#9aa19a';
+  const W = opt.largura || 820, H = opt.altura || 330;
+  const topo = 34, base = 70, esq = 16, dir = 16;
+  const duas = !!opt.serieB;
+  const max = Math.max(1, Math.max.apply(null, dados.map(function (d) { return Math.max(d.a || 0, duas ? (d.b || 0) : 0); })));
+  const areaH = H - topo - base, areaW = W - esq - dir;
+  const slot = areaW / Math.max(dados.length, 1);
+  const barW = Math.max(6, Math.min(duas ? 34 : 56, slot * (duas ? 0.34 : 0.55)));
+  const fonteRot = dados.length > 14 ? 9.5 : 11.5;
+  const maxChars = Math.max(6, Math.floor(slot / (fonteRot * 0.55)));
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">';
+  if (duas) {
+    s += '<rect x="' + (W - 250) + '" y="4" width="11" height="11" rx="2" fill="' + opt.corB + '"/><text x="' + (W - 234) + '" y="14" font-size="12" fill="' + cRot + '">' + resumoEsc(opt.serieB) + '</text>';
+    s += '<rect x="' + (W - 130) + '" y="4" width="11" height="11" rx="2" fill="' + opt.corA + '"/><text x="' + (W - 114) + '" y="14" font-size="12" fill="' + cRot + '">' + resumoEsc(opt.serieA) + '</text>';
+  }
+  const y0 = topo + areaH;
+  s += '<line x1="' + esq + '" x2="' + (W - dir) + '" y1="' + y0 + '" y2="' + y0 + '" stroke="' + cBase + '" stroke-width="1"/>';
+  const barra = function (x, v, cor) {
+    const h = Math.round((v / max) * areaH);
+    let r = '';
+    if (h > 0) {
+      const rr = Math.min(4, h / 2, barW / 2);
+      r += '<path d="M' + x + ',' + y0 + ' v' + (-(h - rr)) + ' q0,' + (-rr) + ' ' + rr + ',' + (-rr) + ' h' + (barW - 2 * rr) + ' q' + rr + ',0 ' + rr + ',' + rr + ' v' + (h - rr) + ' z" fill="' + cor + '"/>';
+    }
+    r += '<text x="' + (x + barW / 2) + '" y="' + (y0 - h - 6) + '" text-anchor="middle" font-size="' + (dados.length > 14 ? 10 : 12) + '" font-weight="bold" fill="' + cTxt + '">' + v + (opt.sufixo || '') + '</text>';
+    return r;
+  };
+  dados.forEach(function (d, i) {
+    const cx = esq + slot * i + slot / 2;
+    if (duas) {
+      s += barra(cx - barW - 1, d.b || 0, opt.corB);
+      s += barra(cx + 1, d.a || 0, opt.corA);
+    } else {
+      s += barra(cx - barW / 2, d.a || 0, d.cor || opt.corA);
+    }
+    quebrarRotulo(d.rotulo, maxChars).forEach(function (linha, li) {
+      s += '<text x="' + cx + '" y="' + (y0 + 17 + li * (fonteRot + 3)) + '" text-anchor="middle" font-size="' + fonteRot + '" fill="' + cRot + '">' + resumoEsc(linha) + '</text>';
+    });
+  });
+  return s + '</svg>';
+}
+
+// Barras horizontais (rótulos longos, ex.: "Fábrica · Assepsia").
+function svgBarrasH(dados, opt) {
+  opt = opt || {};
+  const cTxt = opt.escuro ? '#f1f4ef' : '#222', cRot = opt.escuro ? '#c3cbc4' : '#333';
+  const W = opt.largura || 820, linhaH = 30, esqRot = Math.round(Math.min(300, W * 0.36));
+  const H = Math.max(60, dados.length * linhaH + 10);
+  const max = Math.max(1, Math.max.apply(null, dados.map(function (d) { return d.a || 0; })));
+  const areaW = W - esqRot - 60;
+  let s = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">';
+  dados.forEach(function (d, i) {
+    const y = 6 + i * linhaH;
+    const w = Math.max(2, Math.round(((d.a || 0) / max) * areaW));
+    const maxRot = Math.floor(esqRot / 6.4);
+    const rot = String(d.rotulo).length > maxRot ? String(d.rotulo).slice(0, maxRot - 1) + '…' : d.rotulo;
+    s += '<text x="' + (esqRot - 10) + '" y="' + (y + 16) + '" text-anchor="end" font-size="12" fill="' + cRot + '">' + resumoEsc(rot) + '</text>';
+    s += '<rect x="' + esqRot + '" y="' + (y + 4) + '" width="' + w + '" height="16" rx="4" fill="' + (d.cor || opt.cor || RESUMO_CORES.neutro) + '"/>';
+    s += '<text x="' + (esqRot + w + 8) + '" y="' + (y + 16) + '" font-size="12" font-weight="bold" fill="' + cTxt + '">' + (d.a || 0) + (opt.sufixo || '') + '</text>';
+  });
+  return s + '</svg>';
+}
+
+// ---------- montagem das páginas ----------
+
+function montarResumoHtml(d, rotuloPeriodo) {
+  const bg = new URL('fundo-relatorio.jpg', location.href).href;
+  const A = d.atual, P = d.anterior;
+  const pct = function (a, b) { return b ? Math.round(a / b * 1000) / 10 : 0; };
+  const plural = function (n, s, p) { return n + ' ' + (n === 1 ? s : (p || s + 's')); };
+  const ordenar = function (obj) { return Object.keys(obj || {}).map(function (k) { return { rotulo: k, a: obj[k] }; }).sort(function (x, y) { return y.a - x.a; }); };
+  const cumprLista = function (obj) {
+    return Object.keys(obj || {}).map(function (k) {
+      return { rotulo: k, a: obj[k].realizado, b: obj[k].previsto, pct: pct(obj[k].realizado, obj[k].previsto) };
+    });
+  };
+  const semDados = '<p class="vazio">Sem dados no período.</p>';
+
+  // ---- variação vs período anterior ----
+  function variacao(atual, anterior, menorMelhor) {
+    if (atual === anterior) return { txt: '= 0', cls: 'neutro', piorou: false };
+    const sobe = atual > anterior;
+    const txt = (sobe ? '▲ ' : '▼ ') + (anterior ? Math.round(Math.abs(atual - anterior) / anterior * 100) + '%' : Math.abs(atual - anterior));
+    const piorou = menorMelhor ? sobe : !sobe;
+    return { txt: txt, cls: piorou ? 'ruim' : 'bom', piorou: piorou };
+  }
+  function status(v, atual, anterior, menorMelhor, limiteCritico) {
+    if (!menorMelhor) return atual < 70 ? ['Crítico', 'ruim'] : atual < 90 ? ['Atenção', 'aviso'] : ['OK', 'bom'];
+    if (atual === 0) return ['OK', 'bom'];
+    if (v.piorou && (atual >= (limiteCritico || 5) || (anterior && atual >= anterior * 1.5))) return ['Crítico', 'ruim'];
+    return v.piorou ? ['Atenção', 'aviso'] : ['OK', 'bom'];
+  }
+  const indicadores = [
+    ['% de cumprimento', A.percentualCumprimento, P.percentualCumprimento, false, '%'],
+    ['Atividades realizadas', A.realizados, P.realizados, false, ''],
+    ['Atividades atrasadas', A.atrasados, P.atrasados, true, ''],
+    ['Checklists reprovados', A.reprovados, P.reprovados, true, ''],
+    ['Não conformidades (checklist)', A.naoConformidades, P.naoConformidades, true, ''],
+    ['Ocorrências abertas', A.totalOcorrencias, P.totalOcorrencias, true, ''],
+    ['Não conformidades da Qualidade', A.totalNaoConformidadesQualidade, P.totalNaoConformidadesQualidade, true, '']
+  ].map(function (r) {
+    const v = variacao(r[1], r[2], r[3]);
+    let st;
+    if (r[0] === 'Atividades realizadas') st = v.piorou ? ['Atenção', 'aviso'] : ['OK', 'bom'];
+    else st = status(v, r[1], r[2], r[3]);
+    return { nome: r[0], atual: r[1] + r[4], anterior: r[2] + r[4], variacao: v, status: st };
+  });
+
+  // ---- recortes ----
+  const porTurno = cumprLista(A.cumprimentoPorTurno);
+  const porLocal = cumprLista(A.cumprimentoPorLocal).sort(function (x, y) { return y.b - x.b; });
+  porTurno.forEach(function (t) { if (t.rotulo === 'Qualquer turno') t.rotulo = 'Qualquer turno (basta um)'; });
+  const turnosReais = porTurno.filter(function (t) { return t.rotulo.indexOf('Qualquer turno') !== 0; });
+  const turnoPior = turnosReais.filter(function (t) { return t.b > 0; }).sort(function (x, y) { return x.pct - y.pct; })[0];
+  const localPior = porLocal.filter(function (t) { return t.b > 0; }).sort(function (x, y) { return x.pct - y.pct; })[0];
+  const criticos = d.ambientesCriticos || [];
+  const topAmb = criticos[0];
+  const motivos = ordenar(d.motivosReprovacao);
+  const validados = A.aprovados + A.reprovados;
+
+  // evolução diária (agrupa por semana se o período for longo)
+  const diasOrd = Object.keys(A.cumprimentoPorDia || {}).sort(function (x, y) { return parseBR(x) - parseBR(y); });
+  let evolucao = diasOrd.map(function (k) { const v = A.cumprimentoPorDia[k]; return { rotulo: k.slice(0, 5), a: v.realizado, b: v.previsto }; });
+  let evolucaoTitulo = 'Realizadas × previstas por dia';
+  if (evolucao.length > 31) {
+    const semanas = [];
+    diasOrd.forEach(function (k, i) {
+      const s = Math.floor(i / 7);
+      semanas[s] = semanas[s] || { rotulo: 'a partir de ' + k.slice(0, 5), a: 0, b: 0 };
+      semanas[s].a += A.cumprimentoPorDia[k].realizado; semanas[s].b += A.cumprimentoPorDia[k].previsto;
+    });
+    evolucao = semanas; evolucaoTitulo = 'Realizadas × previstas por semana';
+  }
+
+  // ---- textos automáticos ----
+  let sumario = 'No período analisado — ' + rotuloPeriodo + ' —, foram previstas ' + plural(A.totalPrevisto, 'atividade') +
+    ' de limpeza e realizadas ' + A.realizados + ' (' + A.percentualCumprimento + '% de cumprimento). ';
+  sumario += validados
+    ? 'A Qualidade validou ' + validados + ' checklist(s): ' + A.aprovados + ' aprovado(s) e ' + A.reprovados + ' reprovado(s) (' + A.percentualAprovacao + '% de aprovação). '
+    : 'Nenhum checklist foi validado pela Qualidade no período. ';
+  sumario += 'Foram apontadas ' + plural(A.naoConformidades, 'não conformidade', 'não conformidades') + ' no checklist e ' + plural(d.ocorrencias.total, 'ocorrência') + ' pelos agentes.';
+  if (topAmb) sumario += ' O principal ponto de atenção é ' + topAmb.ambiente + ', com ' + plural(topAmb.total, 'registro') + ' de problema no período.';
+  if (turnoPior && turnosReais.length > 1) sumario += ' O turno com menor cumprimento foi o ' + turnoPior.rotulo + ' (' + turnoPior.pct + '%).';
+
+  const prioridades = [];
+  if (topAmb) prioridades.push(topAmb.ambiente + ': concentra ' + plural(topAmb.total, 'registro') + ' de problema (' +
+    [topAmb.naoConformes && topAmb.naoConformes + ' não conforme(s)', topAmb.reprovados && topAmb.reprovados + ' reprovação(ões)', topAmb.ocorrencias && topAmb.ocorrencias + ' ocorrência(s)', topAmb.ncQualidade && topAmb.ncQualidade + ' NC da Qualidade'].filter(Boolean).join(', ') +
+    '). É o principal ponto de intervenção.');
+  if (turnoPior && turnoPior.pct < 90 && turnosReais.length > 1) prioridades.push(turnoPior.rotulo + ': cumpriu ' + turnoPior.pct + '% do previsto (' + turnoPior.a + ' de ' + turnoPior.b + '). Verificar escala, carga de atividades e registro no app.');
+  if (localPior && localPior.pct < 90) prioridades.push(localPior.rotulo + ': cumpriu ' + localPior.pct + '% do previsto (' + localPior.a + ' de ' + localPior.b + ').');
+  if (A.atrasados > 0) prioridades.push('Atividades atrasadas: ' + A.atrasados + ' previstas não foram registradas no dia/período. Confirmar se não foram feitas ou se só não foram lançadas.');
+  if (motivos[0]) prioridades.push('Motivo de reprovação mais frequente: "' + motivos[0].rotulo + '" (' + motivos[0].a + 'x). Reorientar os agentes nesse ponto.');
+  if (!prioridades.length) prioridades.push('Nenhum ponto crítico identificado no período. Manter a rotina de checklist e validação.');
+
+  const plano = [];
+  if (topAmb) plano.push(['Ação corretiva de limpeza em ' + topAmb.ambiente, 'Alta', 'Eliminar a reincidência de problemas no ambiente.']);
+  if (A.atrasados > 0) plano.push(['Reforçar a execução das atividades atrasadas', A.percentualCumprimento < 70 ? 'Alta' : 'Média', 'Elevar o cumprimento do planejamento.']);
+  if (turnoPior && turnoPior.pct < 90 && turnosReais.length > 1) plano.push(['Acompanhar o ' + turnoPior.rotulo, turnoPior.pct < 70 ? 'Alta' : 'Média', 'Igualar o cumprimento entre os turnos.']);
+  if (A.reprovados > 0) plano.push(['Reorientar agentes nos itens reprovados', 'Média', 'Reduzir reprovações na validação.']);
+  const ocoPend = (d.ocorrencias.porStatus.ABERTA || 0) + (d.ocorrencias.porStatus.EM_ANALISE || 0);
+  if (ocoPend) plano.push(['Analisar ' + plural(ocoPend, 'ocorrência pendente', 'ocorrências pendentes'), 'Média', 'Dar retorno aos agentes e tratar as causas.']);
+  if (d.fotos.semEvidencia > 0) plano.push(['Cobrar evidência fotográfica nas atividades críticas', 'Baixa', 'Garantir rastreabilidade da limpeza.']);
+  plano.push(['Manter rotina de checklist e validação', 'Média', 'Garantir detecção precoce.']);
+
+  let conclusao;
+  if (A.totalPrevisto === 0) conclusao = 'Não havia atividades de limpeza previstas no período selecionado.';
+  else if (A.percentualCumprimento >= 90) conclusao = 'O período apresentou bom cumprimento do planejamento de limpeza (' + A.percentualCumprimento + '%).' + (topAmb ? ' Ainda assim, ' + topAmb.ambiente + ' concentra a maior parte dos problemas e deve seguir acompanhado.' : '');
+  else if (A.percentualCumprimento >= 70) conclusao = 'O cumprimento do planejamento ficou em ' + A.percentualCumprimento + '%, abaixo do ideal. Há desvios que exigem acompanhamento' + (topAmb ? ', com prioridade para ' + topAmb.ambiente : '') + '.';
+  else conclusao = 'O cumprimento do planejamento ficou em ' + A.percentualCumprimento + '%, nível crítico. É necessário rever a execução e o registro das atividades' + (turnoPior && turnosReais.length > 1 ? ', começando pelo ' + turnoPior.rotulo : '') + (topAmb ? ', e tratar ' + topAmb.ambiente + ' como prioridade operacional' : '') + '.';
+
+  // ---- componentes de página ----
+  const slide = function (titulo, corpo, nota) {
+    return '<section class="slide"><h2>' + resumoEsc(titulo) + '</h2><div class="corpo">' + corpo + '</div>' +
+      (nota ? '<p class="nota">' + nota + '</p>' : '') + '</section>';
+  };
+  const grafico = function (svg) { return '<div class="grafico">' + svg + '</div>'; };
+  const tile = function (v, r) { return '<div class="tile"><b>' + resumoEsc(v) + '</b><span>' + resumoEsc(r) + '</span></div>'; };
+  const tabela = function (cab, linhas) {
+    return '<table><thead><tr>' + cab.map(function (c) { return '<th>' + resumoEsc(c) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      linhas.map(function (l) { return '<tr>' + l.map(function (c) { return '<td>' + c + '</td>'; }).join('') + '</tr>'; }).join('') + '</tbody></table>';
+  };
+  const varNota = function (nome, a, b, menorMelhor) {
+    const v = variacao(a, b, menorMelhor);
+    if (a === b) return '<span class="neutro">' + nome + ': igual ao período anterior (' + a + ').</span>';
+    return '<span class="' + v.cls + '">' + (a > b ? '▲ ' : '▼ ') + nome + ': ' + (a > b ? 'aumento' : 'redução') + ' de ' +
+      (b ? Math.round(Math.abs(a - b) / b * 100) + '%' : Math.abs(a - b)) + ' em relação ao período anterior (' + a + ' vs. ' + b + ').</span>';
+  };
+  const corPrio = function (p) { return p === 'Alta' ? 'ruim' : p === 'Média' ? 'aviso' : 'neutro'; };
+
+  const paginas = [];
+
+  // 1. Capa
+  paginas.push('<section class="slide capa"><div><p class="marca">ICC BRAZIL</p><h1>Resumo de Limpeza</h1><p class="sub">Checklist da Qualidade</p>' +
+    '<p class="meta">' + resumoEsc(rotuloPeriodo) + ' &nbsp;·&nbsp; ' + resumoEsc(d.periodo.dataInicial) + ' a ' + resumoEsc(d.periodo.dataFinal) + ' &nbsp;·&nbsp; gerado em ' + resumoEsc(d.geradoEm) + '</p></div></section>');
+
+  // 2. Sumário executivo
+  paginas.push(slide('Sumário executivo',
+    '<p class="texto">' + resumoEsc(sumario) + '</p>' +
+    '<div class="tiles">' +
+      tile(A.totalPrevisto, 'Atividades previstas') + tile(A.realizados, 'Realizadas') + tile(A.percentualCumprimento + '%', '% de cumprimento') +
+      tile(A.atrasados, 'Atrasadas') + tile(validados ? A.percentualAprovacao + '%' : '—', '% de aprovação') + tile(A.naoConformidades, 'Não conformidades') +
+    '</div>',
+    '<i class="neutro">Período anterior usado na comparação: ' + resumoEsc(d.periodoAnterior.dataInicial) + ' a ' + resumoEsc(d.periodoAnterior.dataFinal) + '.</i>'));
+
+  // 3. Leitura gerencial
+  paginas.push(slide('Leitura gerencial dos indicadores', tabela(['Indicador', 'Período', 'Anterior', 'Variação', 'Status'],
+    indicadores.map(function (r) {
+      return [resumoEsc(r.nome), resumoEsc(r.atual), resumoEsc(r.anterior), '<b class="' + r.variacao.cls + '">' + resumoEsc(r.variacao.txt) + '</b>', '<b class="' + r.status[1] + '">' + r.status[0] + '</b>'];
+    }))));
+
+  // 4. Cumprimento por turno
+  paginas.push(slide('Cumprimento por turno',
+    porTurno.length ? grafico(svgColunas(porTurno, { serieA: 'Realizadas', serieB: 'Previstas', corA: RESUMO_CORES.realizado, corB: RESUMO_CORES.previsto })) : semDados,
+    porTurno.map(function (t) { return '<b>' + resumoEsc(t.rotulo) + '</b>: ' + t.pct + '%'; }).join(' &nbsp;·&nbsp; ')));
+
+  // 5. Cumprimento por local
+  paginas.push(slide('Cumprimento por local',
+    porLocal.length ? grafico(svgColunas(porLocal, { serieA: 'Realizadas', serieB: 'Previstas', corA: RESUMO_CORES.realizado, corB: RESUMO_CORES.previsto })) : semDados,
+    porLocal.map(function (t) { return '<b>' + resumoEsc(t.rotulo) + '</b>: ' + t.pct + '%'; }).join(' &nbsp;·&nbsp; ')));
+
+  // 6. Evolução no período
+  paginas.push(slide('Evolução no período',
+    evolucao.length ? '<p class="legenda-graf">' + evolucaoTitulo + '</p>' + grafico(svgColunas(evolucao, { serieA: 'Realizadas', serieB: 'Previstas', corA: RESUMO_CORES.realizado, corB: RESUMO_CORES.previsto, altura: 310 })) : semDados,
+    varNota('Atividades realizadas', A.realizados, P.realizados, false)));
+
+  // 7. Por agente
+  const porAgente = ordenar(A.porAgente).slice(0, 12);
+  paginas.push(slide('Atividades realizadas por agente',
+    porAgente.length ? grafico(svgColunas(porAgente, { corA: RESUMO_CORES.neutro })) : semDados,
+    varNota('Realizadas no total', A.realizados, P.realizados, false)));
+
+  // 8. Validação da Qualidade
+  const sv = d.statusValidacao || {};
+  const validacao = [
+    { rotulo: 'Aprovados', a: sv.APROVADO || 0, cor: RESUMO_CORES.aprovado },
+    { rotulo: 'Reprovados', a: sv.REPROVADO || 0, cor: RESUMO_CORES.reprovado },
+    { rotulo: 'Aguardando validação', a: sv.PENDENTE_VALIDACAO || 0, cor: RESUMO_CORES.pendente },
+    { rotulo: 'Sem validação exigida', a: sv.SEM_VALIDACAO || 0, cor: RESUMO_CORES.previsto }
+  ];
+  paginas.push(slide('Validação da Qualidade',
+    validacao.some(function (v) { return v.a; }) ? grafico(svgColunas(validacao, { altura: 300 })) : semDados,
+    varNota('Reprovações', A.reprovados, P.reprovados, true)));
+
+  // 9. Reprovações por agente + motivos
+  const reprovAg = ordenar(A.reprovadosPorAgente).slice(0, 10);
+  paginas.push(slide('Reprovações: por agente e motivos',
+    reprovAg.length
+      ? '<div class="duas"><div>' + grafico(svgBarrasH(reprovAg, { cor: RESUMO_CORES.reprovado, largura: 520 })) + '</div><div>' +
+        (motivos.length ? tabela(['Motivo mais comum', 'Vezes'], motivos.slice(0, 6).map(function (m) { return [resumoEsc(m.rotulo), m.a]; })) : '<p class="vazio">Sem motivos registrados.</p>') + '</div></div>'
+      : '<p class="vazio">Nenhum checklist reprovado no período.</p>'));
+
+  // 10. Não conformidades por ambiente
+  const ncAmb = ordenar(d.naoConformesPorAmbiente).slice(0, 12);
+  paginas.push(slide('Não conformidades por ambiente',
+    ncAmb.length ? grafico(svgBarrasH(ncAmb, { cor: RESUMO_CORES.pendente })) : '<p class="vazio">Nenhuma não conformidade apontada no checklist no período.</p>',
+    varNota('Não conformidades', A.naoConformidades, P.naoConformidades, true)));
+
+  // 11. Ocorrências
+  const nomesStatusOco = { ABERTA: 'Aberta', EM_ANALISE: 'Em análise', PROCEDENTE: 'Procedente', NAO_PROCEDENTE: 'Não procedente', TRATADA: 'Tratada', ENCERRADA: 'Encerrada' };
+  const ocoStatus = Object.keys(d.ocorrencias.porStatus).map(function (k) { return { rotulo: nomesStatusOco[k] || k, a: d.ocorrencias.porStatus[k] }; });
+  const ocoTurno = ordenar(d.ocorrencias.porTurnoResponsavel);
+  paginas.push(slide('Ocorrências abertas pelos agentes',
+    d.ocorrencias.total
+      ? '<div class="duas"><div><p class="legenda-graf">Por status</p>' + grafico(svgColunas(ocoStatus, { corA: RESUMO_CORES.roxo, largura: 440, altura: 300 })) + '</div>' +
+        '<div><p class="legenda-graf">Por turno responsável (última limpeza)</p>' + (ocoTurno.length ? grafico(svgColunas(ocoTurno, { corA: RESUMO_CORES.roxo, largura: 440, altura: 300 })) : '<p class="vazio">Sem responsável identificado.</p>') + '</div></div>'
+      : '<p class="vazio">Nenhuma ocorrência aberta no período.</p>',
+    d.ocorrencias.total ? plural(d.ocorrencias.total, 'ocorrência') + ' no período, ' + d.ocorrencias.entreTurnos + ' entre turnos (problema deixado por um turno e encontrado por outro).' : ''));
+
+  // 12. Não conformidades da Qualidade + evidências
+  const nc = d.ncQualidade;
+  const f = d.fotos;
+  paginas.push(slide('Inspeções da Qualidade e evidências',
+    '<div class="tiles">' +
+      tile(nc.total, 'NCs abertas pela Qualidade') + tile(nc.porStatus.FINALIZADA || 0, 'NCs finalizadas') + tile((nc.porStatus.ABERTA || 0) + (nc.porStatus.AGUARDANDO_VALIDACAO || 0), 'NCs em aberto') +
+      tile(f.comFotoAntes, 'Com foto ANTES') + tile(f.comFotoDepois, 'Com foto DEPOIS') + tile(f.semEvidencia, 'Sem evidência') +
+    '</div>',
+    f.total ? pct(f.total - f.semEvidencia, f.total) + '% dos checklists do período têm pelo menos uma evidência fotográfica.' : ''));
+
+  // 13. Últimos 6 meses
+  const meses = d.meses || [];
+  paginas.push(slide('Evolução mensal (últimos 6 meses)',
+    '<div class="duas"><div><p class="legenda-graf">Atividades realizadas por mês</p>' + grafico(svgColunas(meses.map(function (m) { return { rotulo: m.rotulo, a: m.realizados }; }), { corA: RESUMO_CORES.realizado, largura: 440, altura: 300 })) + '</div>' +
+    '<div><p class="legenda-graf">Não conformidades por mês</p>' + grafico(svgColunas(meses.map(function (m) { return { rotulo: m.rotulo, a: m.naoConformes }; }), { corA: RESUMO_CORES.pendente, largura: 440, altura: 300 })) + '</div></div>'));
+
+  // 14. Ambientes críticos
+  paginas.push(slide('Ambientes com mais problemas',
+    criticos.length
+      ? tabela(['Local · Ambiente', 'Não conformes', 'Reprovações', 'Ocorrências', 'NC Qualidade', 'Total'],
+          criticos.slice(0, 8).map(function (c) { return [resumoEsc(c.ambiente), c.naoConformes, c.reprovados, c.ocorrencias, c.ncQualidade, '<b>' + c.total + '</b>']; }))
+      : '<p class="vazio">Nenhum problema registrado nos ambientes no período.</p>'));
+
+  // 15. Pontos críticos
+  paginas.push(slide('Pontos críticos e prioridades',
+    prioridades.map(function (p, i) { return '<p class="prioridade">Prioridade ' + (i + 1) + ' — ' + resumoEsc(p) + '</p>'; }).join('')));
+
+  // 16. Plano de ação
+  paginas.push(slide('Plano de ação gerencial', tabela(['Ação', 'Prioridade', 'Objetivo'],
+    plano.map(function (p) { return [resumoEsc(p[0]), '<b class="' + corPrio(p[1]) + '">' + p[1] + '</b>', resumoEsc(p[2])]; }))));
+
+  // 17. Conclusão
+  paginas.push(slide('Conclusão gerencial',
+    '<p class="texto">' + resumoEsc(conclusao) + '</p>' +
+    '<h3>Observações e premissas</h3><p class="premissa">Relatório gerado automaticamente a partir dos registros do app Checklist da Qualidade. ' +
+    '"Previstas" vem do planejamento cadastrado em Atividades de limpeza (frequência e turnos de cada atividade); o dia operacional vira às 06:00, então o que o turno da madrugada faz conta no dia em que o turno começou. ' +
+    'Atividades cadastradas no meio do período contam como previstas desde o início do período. As prioridades e o plano de ação são sugestões automáticas e devem ser revisados por um gestor antes de qualquer apresentação formal.</p>'));
+
+  // 18. Encerramento
+  paginas.push('<section class="slide capa"><div><p class="meta">Documento gerado automaticamente pelo app Checklist da Qualidade — ICC Brazil.</p></div></section>');
+
+  const css =
+    '@page{size:1000px 563px;margin:0}' +
+    '*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+    'body{margin:0;background:#8a8f88;font-family:Arial,Helvetica,sans-serif;color:#222}' +
+    '.barra{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;padding:10px;background:#2a2e31;color:#fff;font-size:14px}' +
+    '.barra button{background:#5e9030;color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:15px;font-weight:bold;cursor:pointer}' +
+    '.paginas{display:flex;flex-direction:column;align-items:center;gap:18px;padding:18px 0}' +
+    '.slide{position:relative;width:1000px;height:563px;overflow:hidden;background:#fff url("' + bg + '") center/cover no-repeat;padding:48px 64px 40px;box-shadow:0 4px 18px rgba(0,0,0,.25);display:flex;flex-direction:column}' +
+    '.slide h2{margin:6px 0 14px;color:#436722;font-size:29px;max-width:760px}' +
+    '.corpo{flex:1;min-height:0}' +
+    '.capa{justify-content:center}' +
+    '.capa .marca{margin:0 0 26px;color:#436722;font-weight:bold;font-size:19px}' +
+    '.capa h1{margin:0;font-size:50px;color:#1d1f21}' +
+    '.capa .sub{margin:6px 0 30px;color:#5e9030;font-size:31px;font-weight:bold}' +
+    '.capa .meta{color:#555;font-size:15px}' +
+    '.texto{font-size:16px;line-height:1.45;margin:0 0 18px;max-width:840px}' +
+    '.tiles{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-top:26px}' +
+    '.tile{background:rgba(238,238,236,.92);padding:14px 12px;min-height:94px}' +
+    '.tile b{display:block;font-size:28px;margin-bottom:6px}.tile span{font-size:12px;color:#555}' +
+    '.nota{margin:8px 0 0;font-size:13px;font-weight:bold;color:#333}' +
+    '.grafico{background:rgba(255,255,255,.93);border:1px solid #e3e5e1;padding:12px 16px}' +
+    '.legenda-graf{margin:0 0 6px;font-size:13px;font-weight:bold;color:#444}' +
+    '.duas{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}' +
+    'table{width:100%;border-collapse:collapse;background:#fff;font-size:13px}' +
+    'th{background:#436722;color:#fff;text-align:left;padding:10px 12px;font-weight:bold}' +
+    'td{padding:9px 12px;border:1px solid #cfd3cc}tr:nth-child(even) td{background:#f6f6f4}' +
+    '.ruim{color:#c63d3d}.aviso{color:#c8741a}.bom{color:#2f7d4a}.neutro{color:#666}' +
+    '.prioridade{font-size:15px;line-height:1.45;margin:0 0 20px;max-width:860px}' +
+    '.slide h3{color:#436722;font-size:19px;margin:34px 0 8px}' +
+    '.premissa{font-size:12px;color:#666;font-style:italic;line-height:1.45;max-width:860px}' +
+    '.vazio{font-size:15px;color:#666;background:rgba(238,238,236,.9);padding:22px}' +
+    '@media print{body{background:none}.barra{display:none}.paginas{display:block;padding:0}.slide{box-shadow:none;page-break-after:always;break-after:page}}' +
+    '@media screen and (max-width:1040px){.paginas{zoom:.9}}' +
+    '@media screen and (max-width:700px){.paginas{zoom:.36}}';
+
+  return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>Resumo de Limpeza - ' + resumoEsc(d.periodo.dataInicial) + ' a ' + resumoEsc(d.periodo.dataFinal) + '</title><style>' + css + '</style></head><body>' +
+    '<div class="barra"><span>Resumo de Limpeza · ' + paginas.length + ' páginas</span><button onclick="window.print()">🖨 Imprimir / Salvar em PDF</button></div>' +
+    '<div class="paginas">' + paginas.join('') + '</div></body></html>';
+}
+
+// ------------------------- DASHBOARD GERAL (tudo numa página) -------------------------
+// Visão completa do checklist de limpeza numa rolagem só, no estilo dos
+// dashboards do app de armazéns (cards escuros com gráficos). Usa os mesmos
+// dados do Resumo gerencial (getResumoLimpeza), então o botão "PDF deste
+// período" gera o resumo impresso sem buscar nada de novo.
+
+async function renderDashGeral() {
+  appendHtml(app, screenHeader('Dashboards', 'Dashboard geral', 'Checklist de limpeza — visão completa'));
+  dashBackButton();
+
+  const st = S.dashGeralFiltro = S.dashGeralFiltro || { periodo: 'mes', local: '', turno: '', ini: '', fim: '' };
+  const filtros = el(
+    '<div class="stack" style="gap:8px">' +
+      '<div class="filters" id="dgPeriodos"></div>' +
+      '<div class="filters" id="dgDatas" style="display:none"><input type="date" id="dgIni"><input type="date" id="dgFim"><button type="button" class="btn btn--outline btn--sm" id="dgAplicar">Aplicar</button></div>' +
+      '<div class="filters"><select id="dgLocal"><option value="">Todos os locais</option></select><select id="dgTurno"><option value="">Todos os turnos</option></select></div>' +
+    '</div>'
+  );
+  app.appendChild(filtros);
+  const corpo = el('<div class="stack" style="margin-top:12px"><p class="subtle">Carregando…</p></div>');
+  app.appendChild(corpo);
+
+  const periodos = [['hoje', 'Hoje'], ['semana', 'Esta semana'], ['mes', 'Este mês'], ['mesPassado', 'Mês passado'], ['custom', 'Personalizado']];
+  const wrapP = filtros.querySelector('#dgPeriodos');
+  periodos.forEach(function (p) {
+    const b = el('<button type="button" class="btn btn--outline btn--sm" data-p="' + p[0] + '">' + p[1] + '</button>');
+    b.onclick = function () { st.periodo = p[0]; marcarPeriodo(); if (p[0] !== 'custom') carregar(); };
+    wrapP.appendChild(b);
+  });
+  function marcarPeriodo() {
+    wrapP.querySelectorAll('button').forEach(function (b) { b.classList.toggle('is-active', b.dataset.p === st.periodo); });
+    filtros.querySelector('#dgDatas').style.display = st.periodo === 'custom' ? 'flex' : 'none';
+  }
+  marcarPeriodo();
+  const inIni = filtros.querySelector('#dgIni'), inFim = filtros.querySelector('#dgFim');
+  inIni.value = st.ini; inFim.value = st.fim;
+  filtros.querySelector('#dgAplicar').onclick = function () {
+    if (!inIni.value || !inFim.value || inIni.value > inFim.value) { toast('Escolha a data inicial e a final.', true); return; }
+    st.ini = inIni.value; st.fim = inFim.value; carregar();
+  };
+
+  const selLocal = filtros.querySelector('#dgLocal'), selTurno = filtros.querySelector('#dgTurno');
+  const [locais, turnos] = await Promise.all([
+    api('getLocais', {}).catch(function () { return []; }),
+    api('getTurnos', {}).catch(function () { return []; })
+  ]);
+  locais.forEach(function (l) { selLocal.appendChild(el('<option value="' + escapeHtml(l.LOCAL) + '">' + escapeHtml(l.LOCAL) + '</option>')); });
+  turnos.forEach(function (t) { selTurno.appendChild(el('<option value="' + escapeHtml(t.TURNO) + '">' + escapeHtml(t.TURNO) + '</option>')); });
+  selLocal.value = st.local; selTurno.value = st.turno;
+  selLocal.onchange = function () { st.local = selLocal.value; carregar(); };
+  selTurno.onchange = function () { st.turno = selTurno.value; carregar(); };
+
+  function periodoAtual() {
+    if (st.periodo === 'custom') {
+      if (!st.ini || !st.fim) return null;
+      const a = new Date(st.ini + 'T00:00:00'), b = new Date(st.fim + 'T00:00:00');
+      return { dataInicial: dateToBR(a), dataFinal: dateToBR(b), rotulo: 'Período de ' + dateToBR(a) + ' a ' + dateToBR(b) };
+    }
+    return periodoResumoPreset(st.periodo);
+  }
+
+  async function carregar() {
+    const per = periodoAtual();
+    if (!per) { corpo.innerHTML = '<p class="subtle">Escolha as datas e toque em Aplicar.</p>'; return; }
+    corpo.innerHTML = '<div class="kpi-grid"><div class="skeleton" style="height:70px"></div><div class="skeleton" style="height:70px"></div><div class="skeleton" style="height:70px"></div><div class="skeleton" style="height:70px"></div></div><div class="skeleton" style="height:240px;margin-top:12px"></div>';
+    const d = await api('getResumoLimpeza', { dataInicial: per.dataInicial, dataFinal: per.dataFinal, local: st.local, turno: st.turno }).catch(function () { return null; });
+    if (!d) { corpo.innerHTML = '<p class="subtle">Não foi possível carregar os dados.</p>'; return; }
+    desenhar(d, per);
+  }
+
+  function desenhar(d, per) {
+    corpo.innerHTML = '';
+    const A = d.atual, P = d.anterior;
+    const pct = function (a, b) { return b ? Math.round(a / b * 1000) / 10 : 0; };
+    const ordenar = function (obj) { return Object.keys(obj || {}).map(function (k) { return { rotulo: k, a: obj[k] }; }).sort(function (x, y) { return y.a - x.a; }); };
+    const cumpr = function (obj) {
+      return Object.keys(obj || {}).map(function (k) { return { rotulo: k === 'Qualquer turno' ? 'Qualquer turno (basta um)' : k, a: obj[k].realizado, b: obj[k].previsto, pct: pct(obj[k].realizado, obj[k].previsto) }; });
+    };
+    const W = 400; // largura interna dos gráficos: próxima da tela do celular, para o texto não encolher
+    const base = { escuro: true, largura: W };
+    const dupla = { escuro: true, largura: W, serieA: 'Realizadas', serieB: 'Previstas', corA: '#6fae3a', corB: '#5d6760' };
+    const comp = function (atual, anterior, menorMelhor) {
+      if (anterior === undefined || anterior === null) return '';
+      return comparativoBadge(atual, anterior, menorMelhor);
+    };
+
+    // Cabeçalho do período + PDF
+    const topo = el('<div class="row between" style="flex-wrap:wrap;gap:8px"><span class="subtle">' + escapeHtml(per.rotulo) + ' · comparado com ' + escapeHtml(d.periodoAnterior.dataInicial) + ' a ' + escapeHtml(d.periodoAnterior.dataFinal) + '</span></div>');
+    const btnPdf = el('<button type="button" class="btn btn--outline btn--sm">📄 PDF deste período</button>');
+    btnPdf.onclick = function () {
+      const j = window.open('', '_blank');
+      if (!j) { toast('O navegador bloqueou a nova aba. Libere pop-ups para este site.', true); return; }
+      j.document.open(); j.document.write(montarResumoHtml(d, per.rotulo + (st.local ? ' · ' + st.local : '') + (st.turno ? ' · ' + st.turno : ''))); j.document.close();
+    };
+    topo.appendChild(btnPdf);
+    corpo.appendChild(topo);
+
+    // Indicadores
+    const validados = A.aprovados + A.reprovados;
+    corpo.appendChild(el(
+      '<div class="kpi-grid">' +
+        kpiComp(A.totalPrevisto, 'Previstas', '') +
+        kpiComp(A.realizados, 'Realizadas', comp(A.realizados, P.realizados, false)) +
+        kpiComp(A.percentualCumprimento + '%', '% de cumprimento', comp(A.percentualCumprimento, P.percentualCumprimento, false)) +
+        kpiComp(A.atrasados, 'Atrasadas', comp(A.atrasados, P.atrasados, true)) +
+        kpiComp(validados ? A.percentualAprovacao + '%' : '—', '% de aprovação', '') +
+        kpiComp(A.reprovados, 'Reprovados', comp(A.reprovados, P.reprovados, true)) +
+        kpiComp(A.naoConformidades, 'Não conformidades', comp(A.naoConformidades, P.naoConformidades, true)) +
+        kpiComp(d.ocorrencias.total, 'Ocorrências', comp(A.totalOcorrencias, P.totalOcorrencias, true)) +
+      '</div>'
+    ));
+
+    const card = function (titulo, sub, conteudo, nota) {
+      corpo.appendChild(el('<div class="dash-card"><h3>' + escapeHtml(titulo) + '</h3>' + (sub ? '<p class="dash-card__sub">' + escapeHtml(sub) + '</p>' : '') +
+        conteudo + (nota ? '<p class="dash-card__nota">' + nota + '</p>' : '') + '</div>'));
+    };
+    const vazio = '<p class="dash-card__sub" style="padding:18px 0">Sem dados no período.</p>';
+    const secao = function (t) { corpo.appendChild(el('<span class="eyebrow" style="display:block;margin-top:10px">' + escapeHtml(t) + '</span>')); };
+
+    secao('Cumprimento do planejamento');
+    const turnosC = cumpr(A.cumprimentoPorTurno);
+    card('Cumprimento por turno', 'Realizadas × previstas', turnosC.length ? svgColunas(turnosC, dupla) : vazio,
+      turnosC.map(function (t) { return escapeHtml(t.rotulo) + ': <b>' + t.pct + '%</b>'; }).join(' · '));
+    const locaisC = cumpr(A.cumprimentoPorLocal).sort(function (x, y) { return y.b - x.b; });
+    card('Cumprimento por local', 'Realizadas × previstas', locaisC.length ? svgColunas(locaisC, dupla) : vazio,
+      locaisC.map(function (t) { return escapeHtml(t.rotulo) + ': <b>' + t.pct + '%</b>'; }).join(' · '));
+    const diasOrd = Object.keys(A.cumprimentoPorDia || {}).sort(function (x, y) { return parseBR(x) - parseBR(y); });
+    const serieDia = diasOrd.map(function (k) { return { rotulo: k.slice(0, 5), a: A.cumprimentoPorDia[k].realizado, b: A.cumprimentoPorDia[k].previsto }; });
+    // Muitos dias: o gráfico fica mais largo que a tela e rola para o lado.
+    if (serieDia.length > 1) card('Evolução no período', 'Realizadas × previstas por dia', svgColunas(serieDia.slice(-31), Object.assign({}, dupla, { largura: Math.max(W, serieDia.length * 26) }))
+      .replace('<svg ', '<svg style="min-width:' + Math.max(360, serieDia.length * 26) + 'px" '));
+
+    secao('Equipe e validação');
+    const ag = ordenar(A.porAgente);
+    card('Realizadas por agente', '', ag.length ? svgBarrasH(ag, { escuro: true, largura: W, cor: '#4f94d4' }) : vazio);
+    const sv = d.statusValidacao || {};
+    card('Validação da Qualidade', 'Situação dos checklists do período', svgColunas([
+      { rotulo: 'Aprovados', a: sv.APROVADO || 0, cor: '#3fa66a' }, { rotulo: 'Reprovados', a: sv.REPROVADO || 0, cor: '#e05858' },
+      { rotulo: 'Aguardando', a: sv.PENDENTE_VALIDACAO || 0, cor: '#e0a23a' }, { rotulo: 'Sem validação', a: sv.SEM_VALIDACAO || 0, cor: '#7c857d' }
+    ], base));
+    const rep = ordenar(A.reprovadosPorAgente);
+    const motivos = ordenar(d.motivosReprovacao).slice(0, 5);
+    card('Reprovações por agente', motivos.length ? 'Motivo mais comum: ' + motivos[0].rotulo + ' (' + motivos[0].a + 'x)' : '',
+      rep.length ? svgBarrasH(rep, { escuro: true, largura: W, cor: '#e05858' }) : '<p class="dash-card__sub" style="padding:18px 0">Nenhuma reprovação no período.</p>');
+
+    secao('Problemas encontrados');
+    const nc = ordenar(d.naoConformesPorAmbiente).slice(0, 10);
+    card('Não conformidades por ambiente', 'Apontadas no checklist', nc.length ? svgBarrasH(nc, { escuro: true, largura: W, cor: '#e0a23a' }) : '<p class="dash-card__sub" style="padding:18px 0">Nenhuma não conformidade no período.</p>');
+    const nomesStatusOco = { ABERTA: 'Aberta', EM_ANALISE: 'Em análise', PROCEDENTE: 'Procedente', NAO_PROCEDENTE: 'Não proced.', TRATADA: 'Tratada', ENCERRADA: 'Encerrada' };
+    const ocoSt = Object.keys(d.ocorrencias.porStatus).map(function (k) { return { rotulo: nomesStatusOco[k] || k, a: d.ocorrencias.porStatus[k] }; });
+    card('Ocorrências por status', d.ocorrencias.total ? d.ocorrencias.total + ' no período · ' + d.ocorrencias.entreTurnos + ' entre turnos' : '', ocoSt.length ? svgColunas(ocoSt, Object.assign({}, base, { corA: '#9b7bea' })) : '<p class="dash-card__sub" style="padding:18px 0">Nenhuma ocorrência no período.</p>');
+    const ocoTurno = ordenar(d.ocorrencias.porTurnoResponsavel);
+    if (ocoTurno.length) card('Ocorrências por turno responsável', 'Turno da última limpeza antes do problema', svgColunas(ocoTurno, Object.assign({}, base, { corA: '#9b7bea' })));
+    const ncq = d.ncQualidade;
+    card('Inspeções da Qualidade', '', svgColunas([
+      { rotulo: 'Abertas pela Qualidade', a: ncq.total, cor: '#4f94d4' },
+      { rotulo: 'Finalizadas', a: ncq.porStatus.FINALIZADA || 0, cor: '#3fa66a' },
+      { rotulo: 'Em aberto', a: (ncq.porStatus.ABERTA || 0) + (ncq.porStatus.AGUARDANDO_VALIDACAO || 0), cor: '#e0a23a' }
+    ], base));
+    const f = d.fotos;
+    card('Evidências fotográficas', f.total ? pct(f.total - f.semEvidencia, f.total) + '% dos checklists têm ao menos uma foto' : '', svgColunas([
+      { rotulo: 'Com foto antes', a: f.comFotoAntes, cor: '#4f94d4' }, { rotulo: 'Com foto depois', a: f.comFotoDepois, cor: '#3fa66a' }, { rotulo: 'Sem evidência', a: f.semEvidencia, cor: '#7c857d' }
+    ], base));
+
+    secao('Evolução mensal (últimos 6 meses)');
+    const meses = d.meses || [];
+    [['realizados', 'Atividades realizadas por mês', '#6fae3a'], ['naoConformes', 'Não conformidades por mês', '#e0a23a'],
+     ['reprovados', 'Reprovações por mês', '#e05858'], ['ocorrencias', 'Ocorrências por mês', '#9b7bea']].forEach(function (m) {
+      card(m[1], '', svgColunas(meses.map(function (x) { return { rotulo: x.rotulo, a: x[m[0]] }; }), Object.assign({}, base, { corA: m[2], altura: 260 })));
+    });
+
+    secao('Ambientes com mais problemas');
+    const crit = d.ambientesCriticos || [];
+    corpo.appendChild(el('<div class="card" style="padding:0;overflow-x:auto">' + (crit.length
+      ? '<table class="report-table" style="min-width:520px"><tr><th>Local · Ambiente</th><th>Não conf.</th><th>Reprov.</th><th>Ocorr.</th><th>NC Qual.</th><th>Total</th></tr>' +
+        crit.map(function (c) { return '<tr><td>' + escapeHtml(c.ambiente) + '</td><td>' + c.naoConformes + '</td><td>' + c.reprovados + '</td><td>' + c.ocorrencias + '</td><td>' + c.ncQualidade + '</td><td><b>' + c.total + '</b></td></tr>'; }).join('') + '</table>'
+      : '<p class="subtle" style="padding:16px">Nenhum problema registrado no período.</p>') + '</div>'));
+  }
+
+  carregar();
+}
+
+// KPI com comparação ao período anterior (reaproveita comparativoBadge).
+function kpiComp(valor, rotulo, comparacao) {
+  return '<div class="kpi"><span class="badge-count">' + escapeHtml(valor) + '</span><span class="subtle">' + escapeHtml(rotulo) + '</span>' +
+    (comparacao ? '<div style="font-size:11.5px;margin-top:4px;line-height:1.3">' + comparacao + '</div>' : '') + '</div>';
 }
