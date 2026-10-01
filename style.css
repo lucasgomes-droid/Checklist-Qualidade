@@ -342,3 +342,36 @@ button,.list-item,.option-btn,.photo-btn,a{touch-action:manipulation;-webkit-tap
 .login-grupo__seta{font-size:18px;color:var(--ink-soft)}
 .login-grupo__lista{padding:14px}
 .card.login-grupo + .card.login-grupo{margin-top:14px}
+
+/* Unidades: escolha no login (antes do nome) */
+.unidade-escolha{display:flex;flex-direction:column;gap:8px;margin:6px 0 2px}
+.unidade-escolha__rotulo{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);font-weight:600}
+.unidade-escolha__opcoes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.unidade-btn{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+  padding:12px 6px;border-radius:var(--radius);border:1.5px solid var(--line);min-width:0;
+  background:#fff;font:inherit;font-weight:600;font-size:14.5px;line-height:1.2;color:var(--ink);cursor:pointer;box-shadow:var(--shadow);
+  text-align:center;
+}
+.unidade-btn__icone{font-size:20px;line-height:1}
+.unidade-btn.is-selected{border-color:var(--accent);background:#eef5e7;color:var(--accent-dark)}
+.unidade-btn:active{transform:scale(.98)}
+#usuariosBlocos{margin-top:4px}
+
+/* Troca de unidade (supervisão) */
+.troca-unidade{position:fixed;top:64px;left:12px;right:12px;z-index:80;max-width:480px;margin:0 auto;max-height:75vh;overflow:auto}
+.list-item.is-atual{border-color:var(--accent);background:#f3f8ee}
+.aviso-todas{background:#e7f0f9;border:1px solid #c9dcef;color:#24577f;border-radius:var(--radius);padding:10px 12px;font-size:13px;line-height:1.45}
+
+/* Comparativo entre unidades */
+.comp-rank{display:grid;grid-template-columns:120px 1fr 92px;gap:10px;align-items:center;font-size:14px}
+.comp-rank__nome{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.comp-rank__val{text-align:right;font-family:var(--mono);font-weight:700}
+.comp-delta{font-family:var(--font);font-size:11.5px;font-weight:600;margin-top:2px}
+.comp-tabela{min-width:0;font-size:12.5px}
+.comp-tabela th,.comp-tabela td{padding:6px 6px}
+.comp-tabela th{text-transform:none;letter-spacing:0;font-size:12px}
+.comp-tabela td:first-child{color:var(--ink-soft);white-space:normal;min-width:96px}
+.topbar .btn{white-space:nowrap}
+.topbar__meta strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:56vw}
+@media (max-width:480px){.comp-rank{grid-template-columns:96px 1fr 78px}}

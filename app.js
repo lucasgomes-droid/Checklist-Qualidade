@@ -54,6 +54,59 @@ const CHECKLIST_STATUS_LABEL = {
 //    sobrevive a queda de internet e a fechar o app (IndexedDB), com
 //    reenvio automático. O resultado já aparece nas listas imediatamente.
 
+// ------------------------- UNIDADES -------------------------
+// Macatuba, Jundiaí I, Jundiaí II… (aba UNIDADES da planilha). A unidade é
+// escolhida no topo da tela de login, fica lembrada no aparelho e vai junto
+// em TODAS as chamadas ao servidor — que devolve só os dados dela.
+// "TODAS" = visão da supervisão (todas as unidades juntas), só para quem
+// tem UNIDADE = TODAS no cadastro.
+const UNIDADE_STORAGE_KEY = 'icc_checklist_unidade';
+const UNIDADES_STORAGE_KEY = 'icc_checklist_unidades';
+const UNIDADES_PADRAO = ['Macatuba', 'Jundiaí I', 'Jundiaí II'];
+const UNIDADE_TODAS = 'TODAS';
+
+function lerStorage(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+function gravarStorage(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* modo privado */ } }
+
+let UNIDADE_ATUAL = lerStorage(UNIDADE_STORAGE_KEY);
+
+function listaUnidades() {
+  try {
+    const salvas = JSON.parse(lerStorage(UNIDADES_STORAGE_KEY) || 'null');
+    if (Array.isArray(salvas) && salvas.length) return salvas;
+  } catch (e) { /* nada */ }
+  return UNIDADES_PADRAO.slice();
+}
+
+function rotuloUnidade(u) { return u === UNIDADE_TODAS ? 'Todas as unidades' : (u || '—'); }
+function ehSupervisao() { return !!(S.usuario && S.usuario.UNIDADE === UNIDADE_TODAS); }
+function vendoTodas() { return UNIDADE_ATUAL === UNIDADE_TODAS; }
+
+// Nome do local nas listas: no modo "Todas" leva a unidade junto.
+function localComUnidade(r) {
+  return (vendoTodas() && r.UNIDADE ? r.UNIDADE + ' · ' : '') + (r.LOCAL || '');
+}
+
+// Troca a unidade em uso: cada unidade tem seu próprio cadastro salvo no
+// aparelho e seu próprio cache de telas.
+function definirUnidade(u) {
+  if (u === UNIDADE_ATUAL) return;
+  UNIDADE_ATUAL = u || '';
+  if (u && u !== UNIDADE_TODAS) gravarStorage(UNIDADE_STORAGE_KEY, u); // "Todas" não vira o padrão do aparelho
+  REF = carregarRefSalvo();
+  _refSujo = false;
+  _cache.clear();
+  if (UNIDADE_ATUAL) refreshRef(renderGen).catch(function () {});
+}
+
+// Atualiza a lista de unidades a partir do servidor (aba UNIDADES).
+function guardarUnidades(lista) {
+  if (!Array.isArray(lista) || !lista.length) return false;
+  const antes = JSON.stringify(listaUnidades());
+  gravarStorage(UNIDADES_STORAGE_KEY, JSON.stringify(lista));
+  return antes !== JSON.stringify(lista);
+}
+
 let renderGen = 0;          // incrementa a cada render(): identifica "a tela atual"
 let lastRenderAt = 0;
 let lastInteractionAt = 0;
@@ -86,7 +139,7 @@ function cleanParams(obj) {
 function flattenParams(obj) { return cleanParams(obj); }
 
 function cacheKey(action, payload) {
-  return action + ':' + JSON.stringify(cleanParams(payload));
+  return action + '@' + UNIDADE_ATUAL + ':' + JSON.stringify(cleanParams(payload));
 }
 
 function checarApiUrl() {
@@ -118,6 +171,9 @@ class ServerError extends Error {} // servidor respondeu ok:false (não é falha
 async function httpCall(action, payload, isRead, opts) {
   checarApiUrl();
   opts = opts || {};
+  // Toda chamada vai com a unidade em uso (a não ser que já venha definida —
+  // ex.: um envio que entrou na fila antes de trocar de unidade).
+  payload = Object.assign({ unidade: UNIDADE_ATUAL }, payload || {});
   if (!opts.background) progressStart();
   let timer = null;
   try {
@@ -232,9 +288,12 @@ let _refPromise = null;
 let _refSujo = false;
 let _semBootstrap = false; // backend antigo sem getBootstrap: cai no modo antigo
 
+function refStorageKey() { return REF_STORAGE_KEY + '|' + UNIDADE_ATUAL; }
+
 function carregarRefSalvo() {
+  if (!UNIDADE_ATUAL) return null;
   try {
-    const raw = localStorage.getItem(REF_STORAGE_KEY);
+    const raw = localStorage.getItem(refStorageKey());
     if (!raw) return null;
     const obj = JSON.parse(raw);
     if (!obj || !obj.d || API_URL !== obj.u) return null;
@@ -244,15 +303,20 @@ function carregarRefSalvo() {
 }
 
 function salvarRef() {
-  try { localStorage.setItem(REF_STORAGE_KEY, JSON.stringify({ d: REF.d, s: REF.s, u: API_URL })); } catch (e) { /* sem espaço/privado: só não persiste */ }
+  try { localStorage.setItem(refStorageKey(), JSON.stringify({ d: REF.d, s: REF.s, u: API_URL })); } catch (e) { /* sem espaço/privado: só não persiste */ }
 }
 
 function invalidarRef() { _refSujo = true; refreshRef(renderGen).catch(function () {}); }
 
+let _refPromiseUnidade = null;
 function refreshRef(gen) {
-  if (_refPromise) return _refPromise;
+  if (_refPromise && _refPromiseUnidade === UNIDADE_ATUAL) return _refPromise;
+  const unid = UNIDADE_ATUAL;
   const tinhaAntes = !!REF;
-  _refPromise = httpCall('getBootstrap', {}, true, { background: tinhaAntes && !_refSujo }).then(function (r) {
+  _refPromiseUnidade = unid;
+  const promessa = httpCall('getBootstrap', { unidade: unid }, true, { background: tinhaAntes && !_refSujo }).then(function (r) {
+    if (r.data && r.data.unidades && guardarUnidades(r.data.unidades) && S.screen === 'loginUsuario' && !S.usuario) avisarDadosNovos(gen);
+    if (unid !== UNIDADE_ATUAL) return REF; // trocou de unidade no meio do caminho: descarta
     const mudou = !REF || REF.s !== r.text;
     REF = { d: r.data, s: r.text, t: Date.now() };
     _refSujo = false;
@@ -264,8 +328,9 @@ function refreshRef(gen) {
       _semBootstrap = true; // Code.gs ainda não foi atualizado
     }
     throw err;
-  }).finally(function () { _refPromise = null; });
-  return _refPromise;
+  }).finally(function () { if (_refPromise === promessa) _refPromise = null; });
+  _refPromise = promessa;
+  return promessa;
 }
 
 async function refRead(action, payload, opts) {
@@ -531,7 +596,7 @@ async function carregarOutboxSalvo() {
 function enviarEmSegundoPlano(action, payload, rotulo, avisarAoConcluir) {
   const id = novoIdLocal();
   const item = {
-    id: id, action: action, payload: Object.assign({}, payload, { clientReqId: id }),
+    id: id, action: action, payload: Object.assign({ unidade: UNIDADE_ATUAL }, payload, { clientReqId: id }),
     rotulo: rotulo, avisar: !!avisarAoConcluir, criadoEm: Date.now(), tentativas: 0, falhou: false, erro: ''
   };
   outbox.push(item);
@@ -666,6 +731,8 @@ const S = {
 };
 
 function resetSession() {
+  if (vendoTodas()) definirUnidade(lerStorage(UNIDADE_STORAGE_KEY));
+  fecharTrocaUnidade();
   S.usuario = null;
   S.screen = 'loginUsuario';
   S.wizard = null;
@@ -1001,11 +1068,58 @@ function comparativoBadge(atual, anterior, menorEhMelhor) {
 // ------------------------- BOOT -------------------------
 
 document.getElementById('btnLogout').onclick = function () { resetSession(); render(); };
+document.getElementById('btnTrocarUnidade').onclick = abrirTrocaUnidade;
+
+// ------------------------- TROCA DE UNIDADE (supervisão) -------------------------
+// Quem tem UNIDADE = TODAS troca de unidade sem sair do app, ou vê todas
+// juntas ("Todas as unidades"). Agente de Limpeza com TODAS só troca entre
+// as unidades (o checklist é sempre de uma unidade).
+function abrirTrocaUnidade() {
+  fecharTrocaUnidade();
+  if (!ehSupervisao()) return;
+  const opcoes = listaUnidades().slice();
+  if (S.usuario.PERFIL === 'ADMIN_QUALIDADE') opcoes.push(UNIDADE_TODAS);
+  const painel = el('<div class="card stack troca-unidade" id="painelTrocaUnidade">' +
+    '<div class="row between"><strong>Trocar unidade</strong><button type="button" class="btn btn--outline btn--sm" data-a="fechar">Fechar</button></div>' +
+    '</div>');
+  opcoes.forEach(function (u) {
+    const atual = u === UNIDADE_ATUAL;
+    const b = el('<button type="button" class="list-item' + (atual ? ' is-atual' : '') + '" style="width:100%">' +
+      '<span><span class="list-item__title">' + (u === UNIDADE_TODAS ? '🌐 ' : '🏭 ') + escapeHtml(rotuloUnidade(u)) + '</span>' +
+      (u === UNIDADE_TODAS ? '<div class="list-item__sub">Ver tudo junto e comparar as unidades</div>' : '') + '</span>' +
+      (atual ? '<span class="tag tag--finalizada">Atual</span>' : '<span>›</span>') + '</button>');
+    b.onclick = function () {
+      fecharTrocaUnidade();
+      if (atual) return;
+      definirUnidade(u);
+      S.wizard = null;
+      S.gestaoAtivLocal = null;
+      go(S.usuario.PERFIL === 'ADMIN_QUALIDADE' ? 'adminHome' : 'agenteHome');
+      toast('Unidade: ' + rotuloUnidade(u), false, true);
+    };
+    painel.appendChild(b);
+  });
+  painel.querySelector('[data-a="fechar"]').onclick = fecharTrocaUnidade;
+  document.body.appendChild(painel);
+}
+
+function fecharTrocaUnidade() {
+  const p = document.getElementById('painelTrocaUnidade');
+  if (p) p.remove();
+}
+
+// Lista de unidades atualizada a partir da planilha (aba UNIDADES).
+function atualizarListaUnidades() {
+  httpCall('getUnidades', {}, true, { background: true }).then(function (r) {
+    if (guardarUnidades(r.data) && S.screen === 'loginUsuario' && !S.usuario) render();
+  }).catch(function () {});
+}
 
 // Desenha a primeira tela na hora (com os usuários salvos no aparelho, se
 // houver) e, em paralelo, já acorda o servidor e confere os cadastros.
 render();
-refreshRef(renderGen).catch(function () {});
+if (UNIDADE_ATUAL) refreshRef(renderGen).catch(function () {});
+atualizarListaUnidades();
 carregarOutboxSalvo();
 
 // ------------------------- ROUTER -------------------------
@@ -1050,7 +1164,8 @@ function render() {
     dashGeral: renderDashGeral,
     relatorios: renderRelatorios,
     relatorioDetalhe: renderRelatorioDetalhe,
-    resumoGerencial: renderResumoGerencial
+    resumoGerencial: renderResumoGerencial,
+    comparativoUnidades: renderComparativoUnidades
   };
   (screens[S.screen] || renderLoginUsuario)();
   updateChrome();
@@ -1065,7 +1180,9 @@ function updateChrome() {
     return;
   }
   topbar.hidden = false;
-  document.getElementById('topbarUnidade').textContent = 'Checklist da Qualidade';
+  document.getElementById('topbarUnidade').textContent = (vendoTodas() ? '🌐 ' : '🏭 ') + rotuloUnidade(UNIDADE_ATUAL);
+  const btnTrocar = document.getElementById('btnTrocarUnidade');
+  if (btnTrocar) btnTrocar.hidden = !ehSupervisao();
   document.getElementById('topbarUsuario').textContent = S.usuario.NOME + ' · ' + (S.usuario.PERFIL === 'ADMIN_QUALIDADE' ? 'Administrador' : 'Agente de Limpeza');
 
   tabbar.hidden = false;
@@ -1097,19 +1214,45 @@ function updateChrome() {
 // ------------------------- LOGIN -------------------------
 
 async function renderLoginUsuario() {
+  // Na tela de login nunca fica "Todas": volta para a unidade do aparelho.
+  if (vendoTodas()) definirUnidade(lerStorage(UNIDADE_STORAGE_KEY));
   appendHtml(app,
-    '<div class="screen" style="padding-top:8vh">' +
+    '<div class="screen" style="padding-top:6vh">' +
       '<div class="login-logo"><img src="logo.png" alt="ICC Brazil" class="mark"></div>' +
       '<h1 class="title-xl" style="text-align:center">Checklist da Qualidade</h1>' +
-      '<p class="subtle" style="text-align:center;margin-bottom:8px">ICC Brazil Animal Nutrition · Selecione seu usuário</p>' +
-      '<div id="usuariosBlocos"><p class="subtle">Carregando usuários…</p></div>' +
+      '<p class="subtle" style="text-align:center;margin-bottom:8px">ICC Brazil Animal Nutrition · Selecione a unidade e o seu usuário</p>' +
+      '<div class="unidade-escolha" id="unidadeEscolha"></div>' +
+      '<div id="usuariosBlocos"></div>' +
     '</div>'
   );
+  // 1º passo: unidade. Escolhida, a lista abaixo mostra só quem é dela.
+  const escolha = document.getElementById('unidadeEscolha');
+  appendHtml(escolha, '<span class="unidade-escolha__rotulo">Unidade</span>');
+  const botoes = el('<div class="unidade-escolha__opcoes"></div>');
+  listaUnidades().forEach(function (u) {
+    const b = el('<button type="button" class="unidade-btn' + (u === UNIDADE_ATUAL ? ' is-selected' : '') + '">' +
+      '<span class="unidade-btn__icone">🏭</span><span>' + escapeHtml(u) + '</span></button>');
+    b.onclick = function () {
+      if (u === UNIDADE_ATUAL) return;
+      definirUnidade(u);
+      S.loginGrupoAberto = null;
+      render();
+    };
+    botoes.appendChild(b);
+  });
+  escolha.appendChild(botoes);
+
+  const wrapUsuarios = document.getElementById('usuariosBlocos');
+  if (!UNIDADE_ATUAL) {
+    wrapUsuarios.innerHTML = '<div class="card"><div class="empty" style="padding:22px 12px"><span class="ic">👆</span>Toque na sua unidade para ver os usuários.</div></div>';
+    return;
+  }
+  wrapUsuarios.innerHTML = '<p class="subtle">Carregando usuários…</p>';
   try {
     const usuarios = await api('getUsuarios', {});
     const wrap = document.getElementById('usuariosBlocos');
     wrap.innerHTML = '';
-    if (!usuarios.length) { wrap.innerHTML = '<p class="subtle">Nenhum usuário ativo cadastrado.</p>'; return; }
+    if (!usuarios.length) { wrap.innerHTML = '<div class="card"><div class="empty" style="padding:22px 12px"><span class="ic">👥</span>Nenhum usuário ativo cadastrado em ' + escapeHtml(UNIDADE_ATUAL) + '.</div></div>'; return; }
 
     // Primeiro só os dois perfis (Agente de Limpeza / Administrador da
     // Qualidade); tocando num deles, abrem os nomes daquele grupo. Tocar de
@@ -1223,7 +1366,7 @@ function renderLoginPin() {
 
 function renderAgenteHome() {
   appendHtml(app,
-    screenHeader('Área do agente', 'Olá, ' + S.usuario.NOME) +
+    screenHeader('Área do agente · ' + rotuloUnidade(UNIDADE_ATUAL), 'Olá, ' + S.usuario.NOME) +
     '<div class="stack">' +
       menuCard('🧹', 'Novo checklist', 'Registrar a limpeza de um ambiente', 'novoChecklist') +
       menuCard('⚠️', 'Abrir ocorrência', 'Registrar uma não conformidade encontrada', 'abrirOcorrencia') +
@@ -1491,7 +1634,7 @@ function renderChecklistsList(wrap, rows) {
       '<div class="list-item" style="width:100%;cursor:default">' +
         '<span><span class="shiplabel">' + escapeHtml(c.ID_CHECKLIST) + '</span>' +
         '<div class="list-item__title" style="margin-top:6px">' + resultadoIcon + escapeHtml(c.ATIVIDADE) + '</div>' +
-        '<div class="list-item__sub">' + escapeHtml(c.LOCAL) + ' · ' + escapeHtml(c.AMBIENTE) + ' · ' + escapeHtml(c.TURNO) + '</div>' +
+        '<div class="list-item__sub">' + escapeHtml(localComUnidade(c)) + ' · ' + escapeHtml(c.AMBIENTE) + ' · ' + escapeHtml(c.TURNO) + '</div>' +
         '<div class="list-item__sub">' + escapeHtml(c.DATA) + ' ' + escapeHtml(c.HORA) + '</div></span>' +
         '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
       '</div>'
@@ -1597,7 +1740,7 @@ function renderOcorrenciasList(wrap, rows, onOpen) {
     const item = el(
       '<button type="button" class="list-item" style="width:100%">' +
         '<span>' +
-        '<div class="list-item__title">' + escapeHtml(o.LOCAL) + ' — ' + escapeHtml(o.AMBIENTE) + '</div>' +
+        '<div class="list-item__title">' + escapeHtml(localComUnidade(o)) + ' — ' + escapeHtml(o.AMBIENTE) + '</div>' +
         '<div class="list-item__sub" style="margin-top:3px">Aberta por <strong>' + escapeHtml(o.AGENTE) + '</strong> · ' + escapeHtml(o.DATA) + ' ' + escapeHtml(o.HORA) + '</div>' +
         responsavelHtml +
         '<div class="shiplabel" style="margin-top:6px">' + escapeHtml(o.ID_OCORRENCIA) + '</div>' +
@@ -1644,7 +1787,10 @@ async function renderAdminHome() {
   // O menu aparece NA HORA; só o card do resumo do dia espera a planilha
   // (antes a tela inteira ficava em "Carregando" até o painel responder).
   S.gestaoAtivLocal = null; // a lista de atividades volta a abrir pelos locais
-  appendHtml(app, screenHeader('Painel da Qualidade', 'Olá, ' + S.usuario.NOME));
+  appendHtml(app, screenHeader('Painel da Qualidade · ' + rotuloUnidade(UNIDADE_ATUAL), 'Olá, ' + S.usuario.NOME));
+  if (vendoTodas()) {
+    appendHtml(app, '<div class="aviso-todas">🌐 Você está vendo <b>todas as unidades juntas</b>. Para cadastrar algo, escolha uma unidade em <b>Trocar</b>, no topo.</div>');
+  }
   const body = el(
     '<div class="stack" id="body" style="margin-top:4px">' +
       '<div class="card stack skeleton-card"><div class="skeleton" style="width:45%;height:18px"></div>' +
@@ -1659,6 +1805,7 @@ async function renderAdminHome() {
     menuCard('🔍', 'Não Conformidade', 'Inspecionar um local e direcionar a um agente', 'naoConformidade') +
     menuCard('📊', 'Dashboards', 'Indicadores de limpeza, validação e ocorrências', 'dashboardHub') +
     menuCard('📄', 'Relatórios', 'Exportar dados em CSV ou PDF', 'relatorios') +
+    (ehSupervisao() ? menuCard('🏭', 'Comparativo entre unidades', 'Macatuba × Jundiaí I × Jundiaí II lado a lado', 'comparativoUnidades') : '') +
   '</div>');
   appendHtml(app, '<div class="stack" style="margin-top:14px">' +
     '<span class="eyebrow">Cadastros</span>' +
@@ -1966,7 +2113,7 @@ async function renderValidacaoChecklists() {
           (podeSelecionar ? '<input type="checkbox" class="chkSelecionar" style="margin-right:10px;width:20px;height:20px" ' + (selecionados[c.ID_CHECKLIST] ? 'checked' : '') + '>' : '') +
           '<span><span class="shiplabel">' + escapeHtml(c.ID_CHECKLIST) + '</span>' +
           '<div class="list-item__title" style="margin-top:6px">' + escapeHtml(c.ATIVIDADE) + '</div>' +
-          '<div class="list-item__sub">' + escapeHtml(c.LOCAL) + ' · ' + escapeHtml(c.AMBIENTE) + ' · ' + escapeHtml(c.AGENTE) + '</div>' +
+          '<div class="list-item__sub">' + escapeHtml(localComUnidade(c)) + ' · ' + escapeHtml(c.AMBIENTE) + ' · ' + escapeHtml(c.AGENTE) + '</div>' +
           '<div class="list-item__sub">' + escapeHtml(c.DATA) + ' ' + escapeHtml(c.HORA) + ' · ' + resultadoTag + '</div></span>' +
           '<span class="tag tag--' + st.cls + '">' + st.label + '</span>' +
         '</button>'
@@ -2204,7 +2351,7 @@ async function renderNaoConformidade() {
       const item = el(
         '<button type="button" class="list-item" style="width:100%">' +
           '<span>' +
-          '<div class="list-item__title">' + escapeHtml(n.LOCAL) + ' — ' + escapeHtml(n.AMBIENTE) + '</div>' +
+          '<div class="list-item__title">' + escapeHtml(localComUnidade(n)) + ' — ' + escapeHtml(n.AMBIENTE) + '</div>' +
           '<div class="list-item__sub" style="margin-top:3px">Direcionada a <strong>' + escapeHtml(n.AGENTE_RESPONSAVEL) + '</strong></div>' +
           '<div class="list-item__sub">' + escapeHtml(n.DATA) + ' ' + escapeHtml(n.HORA) + ' · aberta por ' + escapeHtml(n.ADMIN_ABRIU) + '</div>' +
           '<div class="shiplabel" style="margin-top:6px">' + escapeHtml(n.ID_NC) + '</div>' +
@@ -2510,6 +2657,7 @@ async function renderGestaoUsuarios() {
         '<button type="button" class="list-item" style="width:100%">' +
           '<span><span class="list-item__title">' + escapeHtml(u.NOME) + '</span>' +
           '<div class="list-item__sub">' + (u.PERFIL === 'ADMIN_QUALIDADE' ? 'Administrador da Qualidade' : 'Agente de Limpeza' + (u.TURNO ? ' · ' + escapeHtml(u.TURNO) : '')) + ' · @' + escapeHtml(u.USUARIO) + '</div>' +
+          '<div class="list-item__sub">🏭 ' + escapeHtml(u.UNIDADE === UNIDADE_TODAS ? 'Todas as unidades (supervisão)' : (u.UNIDADE || '—')) + '</div>' +
           (semPin ? '<div class="list-item__sub" style="color:var(--st-risco)">⚠ Sem PIN cadastrado — não consegue entrar</div>' : '') +
           '</span>' +
           '<span class="tag tag--' + (ativo ? 'finalizada' : 'aberta') + '">' + (ativo ? 'Ativo' : 'Inativo') + '</span>' +
@@ -2546,6 +2694,22 @@ async function renderUsuarioForm() {
       { value: 'ADMIN_QUALIDADE', label: 'Administrador da Qualidade' }
     ]
   });
+
+  // Unidade: quem é da supervisão (TODAS) escolhe qualquer uma, inclusive
+  // "Todas"; os demais cadastram só na própria unidade.
+  const unidadeInicial = editando ? (editando.UNIDADE || '') : (vendoTodas() ? '' : UNIDADE_ATUAL);
+  const opcoesUnidade = ehSupervisao() ? listaUnidades().concat([UNIDADE_TODAS]) : [unidadeInicial || UNIDADE_ATUAL];
+  if (unidadeInicial && opcoesUnidade.indexOf(unidadeInicial) === -1) opcoesUnidade.push(unidadeInicial);
+  const unidadeWrap = el('<div class="field"><label>Unidade *</label><select id="selUnidadeUsuario"' + (ehSupervisao() ? '' : ' disabled') + '>' +
+    (ehSupervisao() ? '<option value="">Selecione…</option>' : '') +
+    opcoesUnidade.map(function (u) {
+      return '<option value="' + escapeHtml(u) + '">' + escapeHtml(u === UNIDADE_TODAS ? 'Todas as unidades (supervisão)' : u) + '</option>';
+    }).join('') + '</select>' +
+    (ehSupervisao() ? '<span class="subtle">"Todas" = entra em qualquer unidade e pode ver todas juntas (supervisão / quem ajusta o app).</span>' : '') +
+    '</div>');
+  card.appendChild(unidadeWrap);
+  const selUnidade = unidadeWrap.querySelector('select');
+  if (unidadeInicial) selUnidade.value = unidadeInicial;
 
   // Turno (só para Agente de Limpeza) e Senha (só para Administrador da
   // Qualidade) — mostrados/escondidos conforme o perfil escolhido.
@@ -2619,9 +2783,11 @@ async function renderUsuarioForm() {
       nome: nome.getValue(), usuario: usuario.getValue(), perfil: perfil.getValue(),
       senha: senhaField ? senhaField.getValue() : '',
       turno: turnoField ? turnoField.getValue() : '',
-      pin: pinField ? pinField.getValue() : ''
+      pin: pinField ? pinField.getValue() : '',
+      unidadeUsuario: selUnidade.value
     };
     if (!payload.nome || !payload.usuario) { toast('Preencha nome e usuário.', true); return; }
+    if (!payload.unidadeUsuario) { toast('Selecione a unidade do usuário.', true); return; }
     if (!payload.perfil) { toast('Selecione o perfil.', true); return; }
     if (payload.perfil === 'ADMIN_QUALIDADE' && !editando && !payload.senha) {
       toast('Senha é obrigatória para o perfil Administrador da Qualidade.', true);
@@ -3463,6 +3629,7 @@ function lerRangeFiltro() {
 function renderDashboardHub() {
   appendHtml(app, screenHeader('Dashboards', 'Checklist da Qualidade') + '<div class="stack"></div>');
   const wrap = app.querySelector('.stack:last-child');
+  if (ehSupervisao()) wrap.appendChild(el(menuCard('🏭', 'Comparativo entre unidades', 'As unidades lado a lado, com ranking e destaques', 'comparativoUnidades')));
   wrap.appendChild(el(menuCard('🗂️', 'Dashboard geral', 'Todos os indicadores e gráficos numa página só', 'dashGeral')));
   wrap.appendChild(el(menuCard('🧹', 'Checklist de Limpeza', 'Previsto, realizado, pendente e atrasado — por local', 'dashChecklist')));
   wrap.appendChild(el(menuCard('👥', 'Por Agente e Turno', 'Realizados agrupados por agente e por turno', 'dashAgenteTurno')));
@@ -4590,4 +4757,134 @@ async function renderDashGeral() {
 function kpiComp(valor, rotulo, comparacao) {
   return '<div class="kpi"><span class="badge-count">' + escapeHtml(valor) + '</span><span class="subtle">' + escapeHtml(rotulo) + '</span>' +
     (comparacao ? '<div style="font-size:11.5px;margin-top:4px;line-height:1.3">' + comparacao + '</div>' : '') + '</div>';
+}
+
+// ------------------------- SUPERVISÃO: COMPARATIVO ENTRE UNIDADES -------------------------
+// Só para quem tem UNIDADE = TODAS. Mesmos números dos dashboards de cada
+// unidade, lado a lado, com a variação contra o período anterior.
+
+const CORES_UNIDADE = ['#5e9030', '#3b82c4', '#8b5cf6', '#df8630', '#d64545'];
+
+async function renderComparativoUnidades() {
+  appendHtml(app, screenHeader('Supervisão', 'Comparativo entre unidades', 'Indicadores de cada unidade lado a lado'));
+  const voltar = el('<button class="btn btn--outline btn--sm" style="align-self:flex-start;margin-top:-8px">← Voltar</button>');
+  app.appendChild(voltar);
+  voltar.onclick = function () { go('dashboardHub'); };
+
+  const st = S.compUnidFiltro = S.compUnidFiltro || 'mes';
+  const periodos = [['semana', 'Esta semana'], ['semanaPassada', 'Semana passada'], ['mes', 'Este mês'], ['mesPassado', 'Mês passado']];
+  const wrapP = el('<div class="filters" style="margin-top:4px"></div>');
+  periodos.forEach(function (p) {
+    const b = el('<button type="button" class="btn btn--outline btn--sm' + (p[0] === st ? ' is-active' : '') + '">' + p[1] + '</button>');
+    b.onclick = function () { S.compUnidFiltro = p[0]; render(); };
+    wrapP.appendChild(b);
+  });
+  app.appendChild(wrapP);
+  const corpo = el('<div class="stack" style="margin-top:12px"><div class="card stack"><div class="skeleton" style="height:18px;width:40%"></div><div class="skeleton" style="height:120px"></div></div></div>');
+  app.appendChild(corpo);
+
+  const per = periodoResumoPreset(st);
+  const ant = st === 'semana' ? periodoResumoPreset('semanaPassada') : st === 'mes' ? periodoResumoPreset('mesPassado') : periodoAnteriorRange(per);
+  let atual, anterior;
+  try {
+    const r = await Promise.all([
+      api('getComparativoUnidades', { dataInicial: per.dataInicial, dataFinal: per.dataFinal }),
+      api('getComparativoUnidades', { dataInicial: ant.dataInicial, dataFinal: ant.dataFinal }, { silent: true }).catch(function () { return null; })
+    ]);
+    atual = r[0]; anterior = r[1];
+  } catch (e) { corpo.innerHTML = '<div class="card"><div class="empty">Não foi possível carregar o comparativo.</div></div>'; return; }
+
+  const us = atual.unidades || [];
+  const antPor = {};
+  ((anterior && anterior.unidades) || []).forEach(function (u) { antPor[u.unidade] = u; });
+  const cor = function (i) { return CORES_UNIDADE[i % CORES_UNIDADE.length]; };
+  const fmtPct = function (v) { return (Math.round((v || 0) * 10) / 10).toString().replace('.', ',') + '%'; };
+  const delta = function (atualV, antV, melhorSobe, sufixo) {
+    if (antV === undefined || antV === null) return '';
+    const d = Math.round((atualV - antV) * 10) / 10;
+    if (!d) return '<div class="comp-delta">= anterior</div>';
+    const bom = melhorSobe ? d > 0 : d < 0;
+    return '<div class="comp-delta" style="color:' + (bom ? 'var(--st-finalizada)' : 'var(--st-risco)') + '">' + (d > 0 ? '▲ +' : '▼ ') + String(d).replace('.', ',') + (sufixo || '') + '</div>';
+  };
+
+  corpo.innerHTML = '';
+  appendHtml(corpo, '<p class="subtle">' + escapeHtml(per.rotulo || (per.dataInicial + ' a ' + per.dataFinal)) + ' · comparado com o período anterior</p>');
+
+  // Ranking de cumprimento
+  const ranking = el('<div class="card stack"><h3 class="title-lg">Ranking de cumprimento</h3></div>');
+  us.map(function (u, i) { return { u: u, i: i }; })
+    .sort(function (a, b) { return b.u.percentualCumprimento - a.u.percentualCumprimento; })
+    .forEach(function (x, pos) {
+      const u = x.u, a = antPor[u.unidade];
+      appendHtml(ranking,
+        '<div class="comp-rank">' +
+          '<span class="comp-rank__nome"><b>' + (pos + 1) + 'º</b> ' + escapeHtml(u.unidade) + '</span>' +
+          '<span class="bar-track"><span class="bar-fill" style="display:block;width:' + Math.min(100, Math.round(u.percentualCumprimento || 0)) + '%;background:' + cor(x.i) + '"></span></span>' +
+          '<span class="comp-rank__val">' + fmtPct(u.percentualCumprimento) + (a && a.realizados ? delta(u.percentualCumprimento, a.percentualCumprimento, true, ' p.p.') : '') + '</span>' +
+        '</div>');
+    });
+  corpo.appendChild(ranking);
+
+  // Tabela lado a lado (verde = melhor da linha, vermelho = pior)
+  const linhas = [
+    ['Cumprimento', 'percentualCumprimento', true, true],
+    ['Previstas', 'totalPrevisto'],
+    ['Realizadas', 'realizados'],
+    ['Não realizadas', 'atrasados', false],
+    ['Pendentes hoje', 'pendentes', false],
+    ['Aprovação', 'percentualAprovacao', true, true],
+    ['Aprovadas', 'aprovados'],
+    ['Reprovadas', 'reprovados', false],
+    ['Não conformes', 'naoConformidades', false],
+    ['Ocorrências', 'ocorrencias', false],
+    ['NCs da Qualidade', 'ncQualidade', false],
+    ['Aguardando validação (agora)', 'filaValidacao', false],
+    ['NCs em aberto (agora)', 'ncAbertas', false],
+    ['Agentes ativos', 'agentesAtivos']
+  ];
+  const comDados = us.filter(function (u) { return u.totalPrevisto || u.realizados || u.ocorrencias; }).length;
+  let tabela = '<table class="report-table comp-tabela"><tr><th>Indicador</th>' +
+    us.map(function (u, i) { return '<th style="text-align:right;color:' + cor(i) + '">' + escapeHtml(u.unidade) + '</th>'; }).join('') + '</tr>';
+  linhas.forEach(function (l) {
+    const vals = us.map(function (u) { return Number(u[l[1]]) || 0; });
+    const max = Math.max.apply(null, vals), min = Math.min.apply(null, vals);
+    const temComparacao = l[2] !== undefined && comDados > 1 && max !== min;
+    tabela += '<tr><td>' + l[0] + '</td>' + us.map(function (u, i) {
+      const v = vals[i];
+      let estilo = 'text-align:right';
+      if (temComparacao) {
+        const melhor = l[2] ? max : min, pior = l[2] ? min : max;
+        if (v === melhor) estilo += ';color:var(--st-finalizada);font-weight:700';
+        else if (v === pior) estilo += ';color:var(--st-risco);font-weight:700';
+      }
+      return '<td style="' + estilo + '">' + (l[3] ? fmtPct(v) : v) + '</td>';
+    }).join('') + '</tr>';
+  });
+  tabela += '</table>';
+  const cardTab = el('<div class="card stack"><h3 class="title-lg">Lado a lado</h3><div style="overflow-x:auto">' + tabela + '</div>' +
+    '<span class="subtle">Verde = melhor resultado da linha · vermelho = pior.</span></div>');
+  corpo.appendChild(cardTab);
+
+  // Um card por unidade, com atalho para abrir a unidade
+  us.forEach(function (u, i) {
+    const a = antPor[u.unidade];
+    const card = el('<div class="card stack comp-unidade" style="border-left:4px solid ' + cor(i) + '"></div>');
+    appendHtml(card, '<div class="row between"><h3 class="title-lg" style="color:' + cor(i) + '">' + escapeHtml(u.unidade) + '</h3>' +
+      '<span class="subtle">' + u.agentesAtivos + ' agente' + (u.agentesAtivos === 1 ? '' : 's') + '</span></div>');
+    appendHtml(card, '<div class="kpi-grid">' +
+      '<div class="kpi"><span class="badge-count">' + fmtPct(u.percentualCumprimento) + '</span><div class="subtle">Cumprimento (' + u.realizados + '/' + u.totalPrevisto + ')</div>' + (a && a.realizados ? delta(u.percentualCumprimento, a.percentualCumprimento, true, ' p.p.') : '') + '</div>' +
+      '<div class="kpi"><span class="badge-count">' + fmtPct(u.percentualAprovacao) + '</span><div class="subtle">Aprovação</div>' + (a && a.realizados ? delta(u.percentualAprovacao, a.percentualAprovacao, true, ' p.p.') : '') + '</div>' +
+      '<div class="kpi"><span class="badge-count" style="color:' + (u.reprovados ? 'var(--st-risco)' : 'var(--accent)') + '">' + u.reprovados + '</span><div class="subtle">Reprovadas</div></div>' +
+      '<div class="kpi"><span class="badge-count" style="color:' + (u.ocorrencias ? 'var(--st-aberta)' : 'var(--accent)') + '">' + u.ocorrencias + '</span><div class="subtle">Ocorrências</div>' + (a ? delta(u.ocorrencias, a.ocorrencias, false, '') : '') + '</div>' +
+    '</div>');
+    appendHtml(card, '<div class="subtle">Em aberto agora: <b>' + u.filaValidacao + '</b> aguardando validação · <b>' + u.ocorrenciasPendentes + '</b> ocorrência(s) sem análise · <b>' + u.ncAbertas + '</b> NC(s)</div>');
+    if (u.ambientesCriticos && u.ambientesCriticos.length) {
+      appendHtml(card, '<div class="subtle">Ambientes que mais pedem atenção: ' +
+        u.ambientesCriticos.map(function (x) { return '<b>' + escapeHtml(x.ambiente) + '</b> (' + x.total + ')'; }).join(' · ') + '</div>');
+    }
+    const abrir = el('<button type="button" class="btn btn--outline btn--sm" style="align-self:flex-start">Abrir ' + escapeHtml(u.unidade) + ' ›</button>');
+    abrir.onclick = function () { definirUnidade(u.unidade); go('adminHome'); toast('Unidade: ' + u.unidade, false, true); };
+    card.appendChild(abrir);
+    corpo.appendChild(card);
+  });
 }
